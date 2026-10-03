@@ -51,8 +51,8 @@ export const cfg = {
 
   // Проверка обновлений
   updateCheck: str('TK_UPDATE_CHECK', '1') !== '0',
-  updateRepo: str('TK_UPDATE_REPO', 'cat-of-summer/Toolkit---mcp-package'),
-  updateImage: str('TK_UPDATE_IMAGE', 'ghcr.io/cat-of-summer/toolkit---mcp-package'),
+  updateRepo: str('TK_UPDATE_REPO', 'cat-of-summer/ToolChain---mcp-package'),
+  updateImage: str('TK_UPDATE_IMAGE', 'ghcr.io/cat-of-summer/toolchain---mcp-package'),
 };
 
 /**
