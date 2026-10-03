@@ -23,7 +23,7 @@
 
 ```sh
 mkdir -p ~/toolkit && cd ~/toolkit
-base=https://github.com/cat-of-summer/Toolkit---mcp-package/releases/latest/download
+base=https://github.com/cat-of-summer/ToolChain---mcp-package/releases/latest/download
 curl -fsSL -o docker-compose.yml "$base/docker-compose.yml"
 curl -fsSL -o .env               "$base/default.env.example"
 docker compose up -d
@@ -52,7 +52,7 @@ docker compose exec toolkit tk doctor
 Код сервера лежит в подмодуле `app/data` — ветка `app` этого же репозитория.
 
 ```sh
-git clone --recurse-submodules https://github.com/cat-of-summer/Toolkit---mcp-package.git
+git clone --recurse-submodules https://github.com/cat-of-summer/ToolChain---mcp-package.git
 ```
 
 ### 1. Общая сеть и роутер

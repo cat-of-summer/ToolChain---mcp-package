@@ -1,4 +1,4 @@
 [submodule "app/data"]
 	path = app/data
-	url = https://github.com/cat-of-summer/Toolkit---mcp-package.git
+	url = https://github.com/cat-of-summer/ToolChain---mcp-package.git
 	branch = app
