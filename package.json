@@ -1,0 +1,27 @@
+{
+  "name": "toolkit-mcp",
+  "private": true,
+  "type": "module",
+  "description": "MCP-сервер: рабочая среда агента (mise, код, файлы) и прослойка к серверам по SSH, SFTP, FTP, БД и Docker",
+  "bin": {
+    "tk": "./bin/tk.mjs"
+  },
+  "scripts": {
+    "mcp:http": "node src/index.js --transport=http",
+    "mcp:stdio": "node src/index.js --transport=stdio",
+    "tk": "node bin/tk.mjs",
+    "test": "node --test \"test/*.test.js\""
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "basic-ftp": "^5.0.5",
+    "busboy": "^1.6.0",
+    "mysql2": "^3.11.5",
+    "pg": "^8.13.1",
+    "ssh2": "^1.16.0",
+    "zod": "^3.25.76"
+  }
+}

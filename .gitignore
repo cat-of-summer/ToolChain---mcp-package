@@ -1,0 +1,8 @@
+node_modules/
+# Состояние стенда — только в корне.
+/state/
+/logs/
+/artifacts/
+/workspace/
+/tools/
+docs/tools*.md
