@@ -1,0 +1,50 @@
+services:
+  node:
+    build:
+      context: .
+      dockerfile: services/node/Dockerfile.node
+      args:
+        NODE_VERSION: ${NODE_VERSION:-22}
+        NODE_APT_PACKAGES: ${NODE_APT_PACKAGES:-}
+        PG_CLIENT_VERSION: ${PG_CLIENT_VERSION:-17}
+        MISE_VERSION: ${MISE_VERSION:-v2026.10.1}
+        NODE_ENTRYPOINT: ${NODE_ENTRYPOINT:-services/node/entrypoint.node.sh}
+    hostname: node${INSTANCE}
+    container_name: node${INSTANCE}
+    restart: unless-stopped
+    init: true
+    working_dir: /var/www/html
+    volumes:
+      - ./data:/var/www/html
+      # Рабочая область и тулчейны — в томах, а не в смонтированном каталоге: на файловой
+      # системе Windows теряются биты исполнения и симлинки, а сборка php там ползёт.
+      - workspace:/var/www/html/workspace
+      - tools:/var/www/html/tools
+    ports:
+      - "${MCP_ACCESS:-127.0.0.1:8933:8933}"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    env_file: .env
+    environment:
+      - MCP_PORT=${MCP_PORT:-8933}
+      - NODE_MODE=${NODE_MODE:-mcp}
+    networks:
+      - network
+
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:'+(process.env.MCP_PORT||8933)+'/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))\""]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+
+volumes:
+  workspace:
+    name: toolkit${INSTANCE}_workspace
+  tools:
+    name: toolkit${INSTANCE}_tools
+
+networks:
+  network:
+    external: true
+    name: ${NETWORK:-network}

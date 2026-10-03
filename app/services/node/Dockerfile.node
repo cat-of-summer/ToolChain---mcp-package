@@ -1,0 +1,71 @@
+ARG NODE_VERSION=22
+
+# Не slim: тулчейны (php, ruby, python-пакеты с C-расширениями) собираются здесь из исходников.
+FROM node:${NODE_VERSION}-bookworm
+
+ARG NODE_APT_PACKAGES
+ARG PG_CLIENT_VERSION=17
+ARG MISE_VERSION=v2026.10.1
+ARG OPENSSL_LEGACY_VERSION=1.1.1w
+
+# Клиенты БД нужны для db_dump: дамп снимает штатная утилита, а не самописный обход схемы.
+# pg_dump берётся из репозитория PGDG, а не из Debian: дебиановский 15-й отказывается
+# снимать дамп с сервера 16, а свежий клиент работает с любым сервером не новее себя.
+#
+# Библиотеки для сборки тулчейнов — тот же набор, что в CI git_toolkit: mise собирает php
+# плагином vfox-php, и без них configure отваливается на первой же зависимости.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
+    && curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --dearmor -o /usr/share/keyrings/pgdg.gpg \
+    && echo "deb [signed-by=/usr/share/keyrings/pgdg.gpg] https://apt.postgresql.org/pub/repos/apt bookworm-pgdg main" > /etc/apt/sources.list.d/pgdg.list \
+    && apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+       postgresql-client-${PG_CLIENT_VERSION} default-mysql-client \
+       openssh-client git unzip xz-utils zip rsync jq \
+       build-essential autoconf bison re2c pkg-config \
+       libxml2-dev libssl-dev libicu-dev libzip-dev libonig-dev libcurl4-openssl-dev \
+       libpng-dev libjpeg-dev libfreetype-dev libwebp-dev libgmp-dev libsodium-dev \
+       libreadline-dev libbz2-dev libsqlite3-dev libpq-dev libgd-dev libffi-dev libyaml-dev zlib1g-dev \
+       ${NODE_APT_PACKAGES} \
+    && rm -rf /var/lib/apt/lists/*
+
+# php 5 и 7 не собираются с OpenSSL 3 из bookworm: ext/openssl падает на RSA_SSLV23_PADDING.
+# Для них рядом лежит OpenSSL 1.1 — сборку на него переключает сам стенд (src/local/mise.js),
+# системный OpenSSL остаётся для всего остального.
+RUN curl -fsSL "https://github.com/openssl/openssl/releases/download/OpenSSL_$(echo ${OPENSSL_LEGACY_VERSION} | tr . _)/openssl-${OPENSSL_LEGACY_VERSION}.tar.gz" | tar xz -C /tmp \
+    && cd /tmp/openssl-${OPENSSL_LEGACY_VERSION} \
+    && ./config --prefix=/opt/openssl-1.1 --openssldir=/opt/openssl-1.1/ssl shared zlib no-tests \
+    && make -j"$(nproc)" >/dev/null \
+    && make install_sw >/dev/null \
+    && mkdir -p /opt/openssl-1.1/ssl \
+    && ln -sfn /etc/ssl/certs /opt/openssl-1.1/ssl/certs \
+    && cd / && rm -rf /tmp/openssl-${OPENSSL_LEGACY_VERSION}
+
+# mise — закреплённой версии: стенд должен давать одинаковый результат сегодня и через полгода.
+RUN arch="$(dpkg --print-architecture)" \
+    && case "$arch" in amd64) arch=x64 ;; arm64) arch=arm64 ;; esac \
+    && curl -fsSL -o /usr/local/bin/mise "https://github.com/jdx/mise/releases/download/${MISE_VERSION}/mise-${MISE_VERSION}-linux-${arch}" \
+    && chmod +x /usr/local/bin/mise \
+    && mise --version
+
+# Всё, что ставит mise, — в томе tools: и версии, и глобальный конфиг, и кэш. Пересоздание
+# контейнера не заставляет собирать php заново. Конфиги рабочей области доверенные: их
+# пишет сам агент через env_use. Версия mise закреплена, поэтому проверка обновлений
+# выключена: там, где mise.jdx.dev недоступен, она тормозит каждый вызов на 5–25 с.
+ENV TZ=UTC \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8 \
+    MISE_DATA_DIR=/var/www/html/tools \
+    MISE_CACHE_DIR=/var/www/html/tools/.cache \
+    MISE_GLOBAL_CONFIG_FILE=/var/www/html/tools/config.toml \
+    MISE_TRUSTED_CONFIG_PATHS=/var/www/html/workspace \
+    MISE_YES=1 \
+    MISE_DISABLE_UPDATE_WARNING=1 \
+    PHP_EXTRA_CONFIGURE_OPTIONS=--with-sodium \
+    PATH=/var/www/html/tools/shims:$PATH
+
+ARG NODE_ENTRYPOINT=services/node/entrypoint.node.sh
+COPY ${NODE_ENTRYPOINT} /usr/local/bin/entrypoint.sh
+RUN sed -i 's/\r$//' /usr/local/bin/entrypoint.sh && chmod +x /usr/local/bin/entrypoint.sh
+
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
