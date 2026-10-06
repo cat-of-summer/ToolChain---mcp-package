@@ -119,3 +119,13 @@ test('secret:// разрешается сервисом секретов', async
     server.close();
   }
 });
+
+test('ключ разрешения — user@host того, куда идёт вызов', () => {
+  const ssh = { host: 'h1', user: 'deploy', db: { engine: 'mysql', database: 'shop', user: 'shop' } };
+  assert.equal(targets.accessKeyOf(ssh, 'shell'), 'deploy@h1');
+  assert.equal(targets.accessKeyOf(ssh, 'db'), 'deploy@h1', 'база через туннель — тот же вход по SSH');
+  assert.equal(targets.accessKeyOf({ host: 'h1', proto: 'ftp', user: 'ftpuser' }, 'files'), 'ftpuser@h1');
+  const cloud = { db: { engine: 'postgres', via: 'direct', host: 'db.cloud', user: 'app' } };
+  assert.equal(targets.accessKeyOf(cloud, 'db'), 'app@db.cloud');
+  assert.equal(targets.accessKeyOf({ host: 'h2' }, 'shell'), 'h2', 'без пользователя — адрес');
+});

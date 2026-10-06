@@ -18,7 +18,8 @@ export const cfg = {
   port: int('MCP_PORT', 8933),
   publicBaseUrl: str('PUBLIC_BASE_URL', `http://127.0.0.1:${int('MCP_PORT', 8933)}`),
 
-  // Подтверждения записи на удалённые хосты: host — раз на хост за сессию, off — не спрашивать.
+  // Подтверждения доступа к user@host: host — чтение и запись, по разу за сессию;
+  // write — только запись; off — не спрашивать.
   approval: str('TK_APPROVAL', 'host'),
   approveTimeoutMs: int('TK_APPROVE_TIMEOUT', 300) * 1000,
 

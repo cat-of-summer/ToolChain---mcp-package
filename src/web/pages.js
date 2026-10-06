@@ -62,7 +62,7 @@ ${body}
 export function approvalsPage() {
   return shell('Подтверждения — Toolkit', `
 <h1>Подтверждения</h1>
-<p class="sub">Изменяющее действие ждёт разрешения здесь, когда клиент агента не умеет спрашивать сам.
+<p class="sub">Доступ к серверу и изменяющие действия ждут разрешения здесь, когда клиент агента не умеет спрашивать сам.
 Таймаут — ${Math.round(cfg.approveTimeoutMs / 1000)} с.</p>
 <div id="list"><p class="empty">Загрузка…</p></div>
 <h2 style="font-size:16px;margin-top:32px">Недавние решения</h2>
@@ -85,10 +85,18 @@ function card(item) {
     + '<span class="when">' + when(item.ts) + '</span></div>'
     + '<div style="margin-top:6px">' + escapeHtml(item.summary) + '</div>'
     + details
-    + '<div class="row" style="margin-top:12px">'
-    + '<button class="yes" data-id="' + item.id + '" data-decision="approved">Разрешить</button>'
-    + '<button class="no" data-id="' + item.id + '" data-decision="declined">Отказать</button>'
-    + '</div></div>';
+    + '<div class="row" style="margin-top:12px">' + buttons(item) + '</div></div>';
+}
+
+const LEVELS = { read: 'Только чтение', write: 'Чтение и запись' };
+
+// Вопрос о доступе к серверу — выбор уровня; остальные — да или нет.
+function buttons(item) {
+  const yes = item.choices
+    ? item.choices.map((level) => '<button class="yes" data-id="' + item.id + '" data-decision="' + level + '">'
+        + LEVELS[level] + '</button>').join('')
+    : '<button class="yes" data-id="' + item.id + '" data-decision="approved">Разрешить</button>';
+  return yes + '<button class="no" data-id="' + item.id + '" data-decision="declined">Отказать</button>';
 }
 
 function escapeHtml(s) {
@@ -107,7 +115,7 @@ async function refresh() {
     .filter((item) => item.status !== 'pending')
     .map((item) => '<tr><td>' + when(item.ts) + '</td><td>' + item.tool + '</td>'
       + '<td>' + escapeHtml(item.target || '') + '</td>'
-      + '<td class="' + (item.status === 'approved' ? 'ok' : 'bad') + '">' + item.status + '</td>'
+      + '<td class="' + (['approved', 'read', 'write'].includes(item.status) ? 'ok' : 'bad') + '">' + item.status + '</td>'
       + '<td>' + (item.decidedVia || '') + '</td></tr>').join('')
     + '</tbody></table>';
 }

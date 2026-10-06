@@ -46,6 +46,22 @@ test('run_code сохраняет код и выполняет его', async ()
   assert.match(res.file, /^\.tk\/run\/.+\/main\.mjs$/);
 });
 
+test('свой инструмент из tools/bin вызывается по имени и виден в toolkit_info', async () => {
+  await call('ws_write', { path: 'tools/bin/count-lines', content: '#!/usr/bin/env bash\n# count-lines <файл> — число строк\nwc -l < "$1"\n' });
+  await call('exec', { command: 'chmod +x tools/bin/count-lines' });
+  const res = await call('exec', { command: 'count-lines data/in.txt' });
+  assert.equal(res.exitCode, 0, JSON.stringify(res));
+  assert.equal(res.stdout.trim(), '1');
+
+  const { server: full } = await createServer({ spec: 'all' });
+  const infoClient = new Client({ name: 'test', version: '0' });
+  const [a, b] = InMemoryTransport.createLinkedPair();
+  await Promise.all([full.connect(b), infoClient.connect(a)]);
+  const info = JSON.parse((await infoClient.callTool({ name: 'toolkit_info', arguments: {} })).content[0].text);
+  assert.deepEqual(info.своиИнструменты, [{ name: 'count-lines', about: 'count-lines <файл> — число строк' }]);
+  await infoClient.close();
+});
+
 test('неизвестный язык называет известные', async () => {
   const res = await call('run_code', { tool: 'cobol', code: 'x' });
   assert.match(res.error, /не знает.*python/);

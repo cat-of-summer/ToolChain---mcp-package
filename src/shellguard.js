@@ -1,14 +1,16 @@
 import path from 'node:path';
 import { classify } from './transport/db/sql.js';
 
-// Похожа ли команда на изменяющую. Нужна там, где хост помечен «только чтение»: ssh_exec
-// по построению изменяющий, и без разбора команды каждое `ls` на проде спрашивало бы
-// человека — а вопрос, который задают на всё, перестают читать.
+// Похожа ли команда на изменяющую. ssh_exec по построению изменяющий, и без разбора команды
+// каждое `ls` требовало бы разрешения на запись (а на хосте «только чтение» — вопроса на
+// каждый вызов). Вопрос, который задают на всё, перестают читать. По этому разбору решается,
+// хватит ли разрешения на чтение, и спрашивается ли вызов на хосте «только чтение».
 //
 // Это эвристика, и она это знает. Команда разбирается как шелл без исполнения: кавычки,
 // перенаправления, цепочки, `sh -c` и подстановки `$(…)`. Интерпретатор, запись через
-// python -c или хитрое экранирование она пропустит — задача ловить случайности, а не
-// злой умысел. Ошибка в другую сторону дешевле: лишний вопрос человеку, а не тихая запись.
+// хитрое экранирование она пропустит — задача ловить случайности, а не злой умысел. Поэтому
+// код интерпретатору (python, php -r, node -e, скрипт файлом) сам по себе примета: что он
+// сделает, не разобрать. Ошибка в эту сторону дешевле: лишний вопрос, а не тихая запись.
 
 const SHELLS = new Set(['sh', 'bash', 'dash', 'zsh', 'ksh', 'ash', 'busybox']);
 
@@ -45,6 +47,13 @@ const PACKAGES = {
 const ARTISAN = /^(migrate|db:|down$|up$|key:generate|storage:link|queue:restart|optimize|.*:clear$|.*:cache$|vendor:publish|schedule:run|tinker$)/;
 
 const SQL_CLIENTS = new Set(['mysql', 'mariadb', 'psql']);
+
+// Интерпретаторы: с кодом (-c, -e, -r) или файлом скрипта — запись не разобрать.
+const INTERPRETER = /^(python[\d.]*|pypy[\d.]*|ruby|node|nodejs|perl|lua[\d.]*|php[\d.]*|deno|bun)$/;
+const CODE_FLAGS = new Set(['-c', '-e', '-E', '-r', '-m', '--eval', 'run', 'eval']);
+
+// Сжатие и распаковка пишут файлы рядом, если не сказано писать в stdout или только смотреть.
+const COMPRESSORS = new Set(['gzip', 'gunzip', 'bzip2', 'bunzip2', 'xz', 'unxz', 'zstd', 'unzstd']);
 
 const NULL_TARGETS = new Set(['/dev/null', '/dev/stdout', '/dev/stderr']);
 
@@ -240,6 +249,7 @@ function inspectCommand(words, redirs, depth, signs) {
   if (SHELLS.has(name)) {
     const c = args.indexOf('-c');
     if (c >= 0 && args[c + 1] !== undefined && depth < 4) collect(args[c + 1], depth + 1, signs);
+    else if (c < 0 && args.some((a) => !a.startsWith('-'))) signs.push(`${name}: скрипт файлом не разбирается`);
     return;
   }
   if (name === 'find' && args.some((a) => a === '-delete' || a === '-exec' || a === '-execdir')) {
@@ -290,11 +300,45 @@ function inspectCommand(words, redirs, depth, signs) {
     if (sub && PACKAGES[name].includes(sub.value)) signs.push(`${name} ${sub.value}`);
     return;
   }
+  if (name === 'tar') {
+    const mode = args.find((a) => !a.startsWith('--'))?.replace(/^-/, '').match(/[xcrutA]/)?.[0];
+    const long = args.find((a) => /^--(extract|get|create|append|update|delete|concatenate)$/.test(a));
+    if (long || (mode && mode !== 't')) signs.push(`tar ${long || mode}`);
+    return;
+  }
+  if (name === 'unzip') {
+    if (!args.some((a) => /^-[a-zA-Z]*[lptvZ]/.test(a))) signs.push('unzip');
+    return;
+  }
+  if (COMPRESSORS.has(name)) {
+    if (!args.some((a) => /^-[a-zA-Z0-9]*[clt]/.test(a) || a === '--stdout' || a === '--list' || a === '--test')) signs.push(name);
+    return;
+  }
+  if (name === 'wget') {
+    const out = args.findIndex((a) => a === '-O' || /^-[a-zA-Z]*O$/.test(a));
+    const glued = args.find((a) => /^(-[a-zA-Z]*O|--output-document=)./.test(a));
+    const dest = out >= 0 ? args[out + 1] : glued?.replace(/^(-[a-zA-Z]*O|--output-document=)/, '');
+    if (!args.includes('--spider') && dest !== '-' && !NULL_TARGETS.has(dest)) signs.push('wget');
+    return;
+  }
+  if (name === 'curl') {
+    const out = args.findIndex((a) => a === '-o' || a === '--output');
+    if (out >= 0 && !NULL_TARGETS.has(args[out + 1]) && args[out + 1] !== '-') signs.push('curl -o');
+    if (args.some((a) => a === '-O' || a === '--remote-name' || a === '--remote-name-all')) signs.push('curl -O');
+    return;
+  }
   if (name === 'php' || name === 'artisan') {
     const at = name === 'artisan' ? -1 : args.findIndex((a) => base(a) === 'artisan');
-    if (name === 'php' && at < 0) return;
+    if (name === 'php' && at < 0) {
+      if (args.some((a) => a === '-r' || a === '-f' || !a.startsWith('-'))) signs.push('php: код не разбирается');
+      return;
+    }
     const sub = firstArg(args.slice(at + 1));
     if (sub && ARTISAN.test(sub.value)) signs.push(`artisan ${sub.value}`);
+    return;
+  }
+  if (INTERPRETER.test(name)) {
+    if (args.some((a) => CODE_FLAGS.has(a) || !a.startsWith('-'))) signs.push(`${name}: код не разбирается`);
     return;
   }
   if (SQL_CLIENTS.has(name)) {

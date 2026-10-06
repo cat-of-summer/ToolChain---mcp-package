@@ -21,11 +21,13 @@ function trim() {
   }
 }
 
-export function create({ tool, target, summary, details }) {
+// choices — уровни доступа на выбор (read, write): тогда решение — уровень, а approved
+// значит первый из них, тот, о котором спросили.
+export function create({ tool, target, summary, details, choices }) {
   const id = newId();
   items.set(id, {
     id, ts: now(), tool, target: target ?? null, summary, details: details ?? null,
-    status: 'pending', decidedAt: null, decidedVia: null,
+    choices: choices ?? null, status: 'pending', decidedAt: null, decidedVia: null,
   });
   trim();
   events.emit('change', { id, action: 'created' });
@@ -57,9 +59,11 @@ export function wait(id, timeoutMs) {
 }
 
 export function decide(id, status, via = 'web') {
-  if (!['approved', 'declined'].includes(status)) throw new Error(`решение «${status}» не понято`);
   const item = items.get(id);
   if (!item) throw new Error(`заявка «${id}» не найдена`);
+  if (!['approved', 'declined', ...(item.choices || [])].includes(status)) {
+    throw new Error(`решение «${status}» не понято${item.choices ? `: есть approved, declined, ${item.choices.join(', ')}` : ''}`);
+  }
   if (item.status !== 'pending') throw new Error(`заявка «${id}» уже закрыта: ${item.status}`);
 
   close(id, status, via);

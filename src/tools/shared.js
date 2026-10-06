@@ -50,7 +50,7 @@ function checkKind(def, target, label) {
  */
 function guardOf(target, { mutating, signs }) {
   if (!target?.readonly || !mutating) return null;
-  return { reasons: signs?.length ? signs : ['изменяющий вызов'] };
+  return { reasons: signs ?? ['изменяющий вызов'] };
 }
 
 export function wrap(def, sessionCtx) {
@@ -74,7 +74,12 @@ export function wrap(def, sessionCtx) {
         const found = targets.lookup(ctx.sessionId, args.conn);
         const label = found.name ?? targets.labelOf(found.target);
         checkKind(def, found.target, label);
-        info = { ...found, label, host: targets.hostKeyOf(found.target, def.remote) };
+        info = {
+          ...found,
+          label,
+          host: targets.hostKeyOf(found.target, def.remote),
+          access: targets.accessKeyOf(found.target, def.remote),
+        };
         // Секреты, переданные значением (в том числе паролем в адресе ssh://user:pass@host),
         // известны уже сейчас: их вычищаем и из вопроса человеку, а не только из ответа.
         secrets.push(...targets.literalSecrets(found.target));
@@ -83,6 +88,9 @@ export function wrap(def, sessionCtx) {
 
       const mutating = isMutating(def, args);
       const signs = def.writeSigns ? def.writeSigns(args, info) : null;
+      // Shell изменяющий по построению; пишет ли он на деле, видно по приметам. Без примет
+      // хватает разрешения на чтение, и «только для чтения» не спрашивает.
+      const writes = mutating && (signs === null || signs.length > 0);
       entry.mutating = mutating;
       entry.writeSigns = signs;
 
@@ -94,9 +102,9 @@ export function wrap(def, sessionCtx) {
         entry.approval = await gate.authorize(ctx, {
           tool: def.name,
           target: info.label,
-          host: info.host,
-          mutating,
-          guard: guardOf(info.target, { mutating, signs }),
+          key: info.access,
+          mutating: writes,
+          guard: guardOf(info.target, { mutating: writes, signs }),
           summary: scrub(summary, secrets),
           details: def.details ? scrubDeep(def.details(args, info), secrets) : undefined,
         });

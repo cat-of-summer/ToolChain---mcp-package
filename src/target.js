@@ -189,10 +189,21 @@ export function literalSecrets(target) {
     .filter((value) => typeof value === 'string' && value && !isRef(value));
 }
 
-/** Ключ разрешения на запись: сервер целиком, все протоколы сразу. */
+/** Адрес сервера, куда на деле идёт вызов: у облачной базы это db.host, а не host цели. */
 export function hostKeyOf(target, kind) {
   if (kind === 'db' && target.db?.via === 'direct') return target.db.host;
   return target.host;
+}
+
+/**
+ * Ключ разрешения: user@host. Разрешение выдаётся пользователю на сервере, а не серверу
+ * целиком, и покрывает все протоколы этого пользователя (shell, файлы, docker, база через туннель).
+ */
+export function accessKeyOf(target, kind) {
+  const direct = kind === 'db' && target.db?.via === 'direct';
+  const host = hostKeyOf(target, kind);
+  const user = direct ? target.db.user : target.user;
+  return user ? `${user}@${host}` : host;
 }
 
 // ── Закреплённые ключи хостов ─────────────────────────────────────────────────────────

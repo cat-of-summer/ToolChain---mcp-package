@@ -4,6 +4,7 @@ import { cfg } from '../config.js';
 import { connect, exec, quote } from '../transport/ssh.js';
 import { withFiles } from '../transport/files.js';
 import * as targets from '../target.js';
+import * as gate from '../approve/gate.js';
 import * as ws from '../workspace.js';
 import { writeSigns, scriptSigns } from '../shellguard.js';
 
@@ -80,17 +81,37 @@ export const tools = [
       ru: 'Запоминает цель под именем до конца сессии, чтобы не повторять реквизиты в каждом вызове: '
         + 'дальше ssh_*, files_*, docker_*, db_* принимают conn: "имя". На диск ничего не пишется. '
         + 'Секретные поля — значением, файлом рабочей области (ws:keys/id_ed25519) или ссылкой secret://<id>. '
-        + 'Сервер не трогается: проверить вход — conn_check.',
+        + 'Сервер не трогается: проверить вход — conn_check. access — спросить доступ к user@host сразу, '
+        + 'одним вопросом: write, если работа точно с записью, — тогда ни чтение, ни запись дальше не спросят.',
       en: 'Remembers a target under a name until the session ends, so credentials are not repeated: '
         + 'ssh_*, files_*, docker_*, db_* then take conn: "name". Nothing is written to disk. Secret '
         + 'fields take a value, a workspace file (ws:keys/id_ed25519) or a secret://<id> reference. '
-        + 'The server is not contacted: use conn_check to test the login.',
+        + 'The server is not contacted: use conn_check to test the login. access asks for user@host access '
+        + 'up front in one question: write when the work surely writes — then neither reads nor writes ask again.',
     }),
     input: {
       name: z.string().describe(pick({ ru: 'имя, например shop-prod', en: 'name, e.g. shop-prod' })),
       target: targets.targetSchema,
+      access: z.enum(['read', 'write']).optional().describe(pick({
+        ru: 'спросить доступ сразу: read или write (запись включает чтение)',
+        en: 'ask for access right away: read or write (write includes read)',
+      })),
     },
-    run: (args, { ctx }) => ({ data: { name: args.name, ...targets.open(ctx.sessionId, args.name, args.target) } }),
+    run: async (args, { ctx }) => {
+      const opened = targets.open(ctx.sessionId, args.name, args.target);
+      if (!args.access) return { data: { name: args.name, ...opened } };
+
+      const target = targets.lookup(ctx.sessionId, args.name).target;
+      const key = targets.accessKeyOf(target, target.host ? 'shell' : 'db');
+      const approval = await gate.authorize(ctx, {
+        tool: 'conn_open',
+        target: targets.labelOf(target),
+        key,
+        mutating: args.access === 'write',
+        summary: `агент открыл «${args.name}» и заранее просит ${args.access === 'write' ? 'чтение и запись' : 'чтение'}`,
+      });
+      return { data: { name: args.name, ...opened, доступ: { [key]: approval.level ?? `не спрашивается (TK_APPROVAL=${cfg.approval})` } } };
+    },
   },
 
   {

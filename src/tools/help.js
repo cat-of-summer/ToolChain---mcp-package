@@ -10,6 +10,7 @@ import { poolState } from '../transport/ssh.js';
 import * as targets from '../target.js';
 import * as jobs from '../local/jobs.js';
 import * as mise from '../local/mise.js';
+import { ownTools } from '../workspace.js';
 import { versionsHost } from '../local/reach.js';
 import { upgradeSteps } from '../update.js';
 
@@ -24,14 +25,35 @@ const RU = {
 Локально (в контейнере стенда, в рабочей области):
   env_*   — языки и инструменты через mise: python@3.11, php@7.4, node@latest…
   exec, run_code — команды и код; долгое уходит в фон задачей (job_*)
+  tools/bin — скрипты, которые агент пишет себе сам: вызываются по имени, переживают сессию
   ws_*    — файлы рабочей области; с машины человека — /upload, обратно — ссылка /files/…
+
+Нет python, php или нужной утилиты на машине человека — это не повод переходить на bash
+и разбирать вручную: тот же код запускается здесь, версия ставится сама. Подробнее — tools.
 
 Удалённо (стенд доступов не хранит — цель приходит в вызове):
   conn_open — запомнить цель под именем до конца сессии; дальше conn: "имя"
   ssh_*, files_* (sftp/ftp/ftps), docker_*, db_*
   audit_*  — журнал всего, что делалось
 
-Разделы: index, workspace, env, run, targets, secrets, approvals, audit.`,
+Разделы: index, tools, workspace, env, run, targets, secrets, approvals, audit.`,
+
+  tools: `Задачу, которую проще решить кодом, решайте кодом, а не цепочкой sed/awk/grep или ручным разбором:
+разбор логов и выгрузок, массовая правка файлов, сверка дампов, конвертация форматов, проверки по
+списку адресов. Чего нет на машине человека, есть здесь: run_code(tool: "python@3.11") или exec с
+tools — недостающая версия ставится сама, pip/npm/composer ставят библиотеки без вопросов.
+
+Повторится — оформите инструментом. tools/bin рабочей области стоит в PATH у exec и run_code:
+  - один файл — одна команда, имя — глагол-существительное: parse-access-log, diff-dumps;
+  - первая строка после шебанга — комментарий с назначением и аргументами: его показывает
+    toolkit_info в «своиИнструменты»;
+  - версия языка — в шебанге: #!/usr/bin/env -S mise exec python@3.11 -- python
+    (или bash/node без версии); права — chmod +x через exec;
+  - вход — аргументы и stdin, выход — stdout; секреты — через env (ws:…, secret://…).
+
+Перед тем как писать новый — посмотрите toolkit_info: похожий, скорее всего, уже есть. Не хватает
+возможности — доработайте существующий, а не заводите копию рядом. Рабочая область лежит в томе:
+написанное сегодня пригодится в следующей сессии.`,
 
   workspace: `Рабочая область — каталог в томе стенда. Реальные папки машины человека сюда не монтируются.
 Пути всегда относительные к её корню; «..» и симлинки наружу отклоняются.
@@ -54,11 +76,12 @@ const RU = {
   - env_use(dir, tools) — mise.toml в каталоге области: дальше php/python там нужных версий;
   - env_use с global — для всего остального.
 Список версий — env_available(tool, prefix). Что угодно из реестра mise (mise registry):
-terraform, kubectl, rust, dotnet и т.д.`,
+terraform, kubectl, rust, dotnet и т.д. Чего нет на машине человека — ставится здесь (раздел tools).`,
 
   run: `exec — bash в контейнере стенда, cwd — рабочая область. Контейнер — песочница стенда: apt-get,
 pip, composer и npm ставят что нужно, подтверждений нет.
 run_code — код строкой: сохраняется в файл и выполняется нужной версией.
+Скрипты из tools/bin вызываются по имени: каталог в PATH (раздел tools).
 
 Любой запуск — задача. Не уложилась в ~${Math.round(cfg.foregroundMs / 1000)} с — вызов отдаёт её id, а она продолжается в фоне.
 job_status(id, wait) ждёт и возвращает хвосты потоков, saveTo — stdout целиком в файл области.
@@ -86,9 +109,14 @@ db.via: tunnel — драйвер через SSH-туннель (порт баз
 Предпочтительнее ссылка или файл: значение в аргументах проходит через контекст модели и транскрипт.`,
 
   approvals: `Локальная работа (env, run, jobs, ws) не спрашивается: это песочница стенда.
-Первый изменяющий вызов на удалённый сервер спрашивает человека один раз за сессию; разрешение
-покрывает весь сервер (shell, файлы, docker, база). Отказ закрывает запись на этот сервер до конца
-сессии, чтение остаётся. TK_APPROVAL=off выключает вопрос.
+Удалённый доступ разрешается пользователю на сервере — user@host — и по уровням, каждый раз за сессию:
+  - первый вызов к user@host спрашивает доступ; человек выбирает «только чтение» или сразу
+    «чтение и запись». Дальше читающие вызовы идут без вопросов;
+  - первый изменяющий вызов при выданном чтении спрашивает запись ещё раз — и всё, дальше молча;
+  - знаете заранее, что будете писать, — conn_open(access: "write"): один вопрос на всё.
+Разрешение покрывает все протоколы этого пользователя (shell, файлы, docker, база через туннель);
+другой пользователь на том же сервере спрашивается отдельно. Отказ запоминается: на чтение — закрывает
+доступ, на запись — только запись. TK_APPROVAL=write спрашивает только запись, off — ничего.
 Цель с readonly: true спрашивает про каждый похожий на запись вызов — и после выданного разрешения.
 Спрашивает клиент (elicitation); если не умеет — заявка ждёт на ${cfg.publicBaseUrl}/approvals
 до ${Math.round(cfg.approveTimeoutMs / 1000)} с. Отказ и таймаут — обычный исход: сообщите о нём, не обходите другим инструментом.`,
@@ -106,14 +134,33 @@ const EN = {
 Local (in the toolkit container, inside the workspace):
   env_*   — languages and tools via mise: python@3.11, php@7.4, node@latest…
   exec, run_code — commands and code; long runs become background jobs (job_*)
+  tools/bin — scripts the agent writes for itself: called by name, they outlive the session
   ws_*    — workspace files; from the human's machine — /upload, back — a /files/… link
+
+No python, php or a needed utility on the human's machine is no reason to fall back to bash and
+manual parsing: the same code runs here, the version installs itself. More — tools.
 
 Remote (the toolkit stores no credentials — the target comes with the call):
   conn_open — remember a target under a name for the session; then conn: "name"
   ssh_*, files_* (sftp/ftp/ftps), docker_*, db_*
   audit_*  — journal of everything done
 
-Topics: index, workspace, env, run, targets, secrets, approvals, audit.`,
+Topics: index, tools, workspace, env, run, targets, secrets, approvals, audit.`,
+  tools: `A task that is easier as code gets solved as code, not a chain of sed/awk/grep or manual parsing:
+logs and exports, bulk file edits, dump comparison, format conversion, checks over a list of hosts.
+What the human's machine lacks is here: run_code(tool: "python@3.11") or exec with tools — a missing
+version installs itself, pip/npm/composer install libraries without questions.
+
+If it will repeat, make it a tool. The workspace's tools/bin is on PATH for exec and run_code:
+  - one file — one command, named verb-noun: parse-access-log, diff-dumps;
+  - the first line after the shebang is a comment with purpose and arguments: toolkit_info shows it;
+  - the language version goes into the shebang: #!/usr/bin/env -S mise exec python@3.11 -- python
+    (or bash/node without a version); chmod +x via exec;
+  - input — arguments and stdin, output — stdout; secrets via env (ws:…, secret://…).
+
+Before writing a new one check toolkit_info: a similar one is likely there. Missing a feature —
+extend the existing tool instead of adding a copy. The workspace is a volume: what you write today
+serves the next session.`,
   workspace: RU.workspace,
   env: RU.env,
   run: RU.run,
@@ -144,10 +191,10 @@ export const tools = [
     mutating: false,
     title: pick({ ru: 'Состояние стенда', en: 'Toolkit state' }),
     description: pick({
-      ru: 'Версия и обновление, поднятые группы инструментов, mise, открытые подключения и разрешения '
-        + 'этой сессии, задачи, висящие подтверждения, адреса /upload и /files. Сюда идут, когда '
-        + 'инструмент ответил странно.',
-      en: 'Version and update, active tool groups, mise, this session\'s open connections and grants, '
+      ru: 'Версия и обновление, поднятые группы инструментов, mise, свои инструменты агента (tools/bin), '
+        + 'открытые подключения и разрешения этой сессии, задачи, висящие подтверждения, адреса /upload и '
+        + '/files. Сюда идут, когда инструмент ответил странно, и перед тем, как писать новый скрипт.',
+      en: 'Version and update, active tool groups, mise, the agent\'s own tools (tools/bin), this session\'s open connections and grants, '
         + 'jobs, pending approvals, /upload and /files addresses. Check here when a tool answers oddly.',
     }),
     input: {},
@@ -166,6 +213,7 @@ export const tools = [
             задачВРаботе: jobs.running(),
             хостВерсий: { true: 'mise-versions.jdx.dev доступен', false: 'недоступен — версии из первоисточников, python собирается из исходников', null: 'ещё не проверен' }[versionsHost()],
           },
+          своиИнструменты: ownTools(),
           подключения: targets.list(ctx?.sessionId),
           подтверждения: {
             режим: `TK_APPROVAL=${cfg.approval}`,

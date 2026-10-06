@@ -20,8 +20,11 @@ export const DIRS = {
 
 export const KNOWN_HOSTS = path.join(DIRS.state, 'known_hosts.json');
 
+// Инструменты, которые агент пишет себе сам: каталог рабочей области в PATH команд стенда.
+export const TOOLS_BIN = 'tools/bin';
+
 export function ensureDirs() {
   for (const dir of Object.values(DIRS)) fs.mkdirSync(dir, { recursive: true });
 }
 
-export default { ROOT, DIRS, KNOWN_HOSTS, ensureDirs };
+export default { ROOT, DIRS, KNOWN_HOSTS, TOOLS_BIN, ensureDirs };

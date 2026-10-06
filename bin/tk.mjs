@@ -25,7 +25,8 @@ const HELP = `tk — стенд Toolkit руками
 
   tk doctor                      состояние: сервер, mise, каталоги, OpenSSL для php 5/7
   tk approve ls                  что ждёт разрешения
-  tk approve yes|no <id>         разрешить или отказать
+  tk approve yes|no <id>         разрешить (что спросили) или отказать
+  tk approve read|write <id>     доступ к серверу: только чтение или чтение и запись
   tk log tail [N]                последние действия
   tk log show <id>               запись журнала целиком
   tk mise <аргументы>            mise с окружением стенда (например: tk mise ls)`;
@@ -53,11 +54,12 @@ async function main() {
 
     case 'approve':
       if (sub === 'ls' || !sub) return out((await api('/api/approvals')).pending);
-      if ((sub === 'yes' || sub === 'no') && rest[0]) {
+      if (['yes', 'no', 'read', 'write'].includes(sub) && rest[0]) {
+        const decision = { yes: 'approved', no: 'declined' }[sub] ?? sub;
         return out(await api(`/api/approvals/${rest[0]}`, {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ decision: sub === 'yes' ? 'approved' : 'declined' }),
+          body: JSON.stringify({ decision }),
         }));
       }
       break;

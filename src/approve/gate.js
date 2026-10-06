@@ -7,11 +7,16 @@ import { redact } from '../secrets.js';
 // elicitation MCP и веб-очередь, если клиент спрашивать не умеет.
 //
 // Что спрашивается:
-//   - первая запись на удалённый сервер — один раз за сессию, разрешение покрывает все
-//     протоколы этого сервера (shell, файлы, docker, база). TK_APPROVAL=off отключает;
+//   - доступ к пользователю на сервере (user@host) — по уровням и один раз за сессию:
+//     первый вызов спрашивает чтение (человек может сразу дать и запись), первый
+//     изменяющий — запись. Дальше вызовы того же уровня идут молча, по всем протоколам
+//     этого пользователя (shell, файлы, docker, база). TK_APPROVAL=write спрашивает только
+//     запись, off — ничего;
 //   - цель с readonly: true — каждый похожий на запись вызов, при любой настройке;
 //   - замена закреплённого ключа хоста — каждый раз.
 // Работа в рабочей области стенда не спрашивается: это песочница самого стенда.
+
+const LEVEL_TITLES = { read: 'Только чтение', write: 'Чтение и запись' };
 
 export class Declined extends Error {
   constructor(decision, summary) {
@@ -26,11 +31,49 @@ function reason(decision) {
   if (decision.status === 'timeout') {
     return `подтверждение не получено за ${Math.round(cfg.approveTimeoutMs / 1000)} с`;
   }
-  if (decision.scope === 'host' && decision.granted) return `запись на «${decision.host}» запрещена ранее в этой сессии`;
+  if (decision.scope === 'access') {
+    if (decision.readOnly) return `человек разрешил на «${decision.key}» только чтение`;
+    if (decision.granted) {
+      return decision.need === 'write'
+        ? `запись на «${decision.key}» запрещена ранее в этой сессии`
+        : `доступ к «${decision.key}» запрещён ранее в этой сессии`;
+    }
+  }
   return 'человек отказал';
 }
 
-async function viaElicitation(ctx, { summary, details }) {
+/** Схема вопроса: да/нет или выбор уровня доступа. */
+function schemaOf(choices) {
+  if (!choices) {
+    return {
+      approve: {
+        type: 'boolean',
+        title: 'Разрешить?',
+        description: 'Да — стенд выполнит действие и запишет его в журнал. Нет — действие не состоится.',
+      },
+    };
+  }
+  return {
+    access: {
+      type: 'string',
+      title: 'Доступ',
+      oneOf: [
+        ...choices.map((level) => ({ const: level, title: LEVEL_TITLES[level] })),
+        { const: 'deny', title: 'Отказать' },
+      ],
+      default: choices[0],
+    },
+  };
+}
+
+/** Ответ клиента → решение. С выбором уровня approved несёт выбранный уровень. */
+function readAnswer(content, choices) {
+  if (!choices) return content?.approve === false ? { status: 'declined' } : { status: 'approved' };
+  const level = content?.access;
+  return choices.includes(level) ? { status: 'approved', level } : { status: 'declined' };
+}
+
+async function viaElicitation(ctx, { summary, details, choices }) {
   const caps = ctx?.server?.server?.getClientCapabilities?.();
   if (!caps?.elicitation) return null;
 
@@ -41,19 +84,10 @@ async function viaElicitation(ctx, { summary, details }) {
   }
 
   try {
+    const properties = schemaOf(choices);
     const res = await ctx.server.server.elicitInput({
       message: lines.join('\n'),
-      requestedSchema: {
-        type: 'object',
-        properties: {
-          approve: {
-            type: 'boolean',
-            title: 'Разрешить?',
-            description: 'Да — стенд выполнит действие и запишет его в журнал. Нет — действие не состоится.',
-          },
-        },
-        required: ['approve'],
-      },
+      requestedSchema: { type: 'object', properties, required: Object.keys(properties) },
     }, {
       timeout: cfg.approveTimeoutMs,
       // Без привязки к запросу SDK шлёт вопрос в фоновый поток сессии, а если клиент
@@ -61,9 +95,7 @@ async function viaElicitation(ctx, { summary, details }) {
       relatedRequestId: ctx.requestId,
     });
 
-    if (res.action === 'accept') {
-      return { status: res.content?.approve === false ? 'declined' : 'approved', via: 'elicitation' };
-    }
+    if (res.action === 'accept') return { ...readAnswer(res.content, choices), via: 'elicitation' };
     if (res.action === 'decline') return { status: 'declined', via: 'elicitation' };
     return null; // cancel — уходим в очередь, вдруг человек ответит там
   } catch {
@@ -79,21 +111,34 @@ function safe(value, depth = 0) {
   return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, safe(v, depth + 1)]));
 }
 
-/** Задаёт человеку один вопрос: сначала клиенту, при неудаче — в веб-очередь. */
-export async function ask(ctx, { tool, target, summary, details }) {
+/**
+ * Задаёт человеку один вопрос: сначала клиенту, при неудаче — в веб-очередь.
+ * choices — уровни доступа на выбор (первый — тот, о котором спросили); без них вопрос да/нет.
+ * Одобренное решение с choices несёт level.
+ */
+export async function ask(ctx, { tool, target, summary, details, choices }) {
   const cleanSummary = redact(summary);
   const cleanDetails = safe(details);
+  const item = { tool, target, summary: cleanSummary, details: cleanDetails, choices };
 
-  const answered = await viaElicitation(ctx, { summary: cleanSummary, details: cleanDetails });
+  const answered = await viaElicitation(ctx, item);
   if (answered) {
-    const id = queue.create({ tool, target, summary: cleanSummary, details: cleanDetails });
-    queue.decide(id, answered.status, 'elicitation');
+    const id = queue.create(item);
+    queue.decide(id, answered.level ?? answered.status, 'elicitation');
     return { ...answered, id };
   }
 
-  const id = queue.create({ tool, target, summary: cleanSummary, details: cleanDetails });
+  const id = queue.create(item);
   const outcome = await queue.wait(id, cfg.approveTimeoutMs);
-  return { ...outcome, id, url: `${cfg.publicBaseUrl}/approvals` };
+  return { ...fromQueue(outcome, choices), id, url: `${cfg.publicBaseUrl}/approvals` };
+}
+
+/** Решение очереди: approved — тот уровень, о котором спросили; read/write — выбранный. */
+function fromQueue(outcome, choices) {
+  if (!choices) return outcome;
+  if (outcome.status === 'approved') return { ...outcome, level: choices[0] };
+  if (choices.includes(outcome.status)) return { ...outcome, status: 'approved', level: outcome.status };
+  return outcome;
 }
 
 /** Вопрос без памяти: задаётся каждый раз. */
@@ -104,23 +149,56 @@ export async function perCall(ctx, call) {
   return record;
 }
 
-/** Запись на сервер: спрашивается один раз за сессию, ответ — и отказ тоже — запоминается. */
-async function perHost(ctx, call) {
-  const base = { required: true, scope: 'host', host: call.host };
-  const known = grants.get(ctx.sessionId, call.host);
-
-  if (known === 'denied') throw new Declined({ ...base, status: 'declined', granted: 'ранее' }, call.summary);
-  if (known === 'granted') return { ...base, status: 'approved', granted: 'ранее в этой сессии' };
-
-  const summary = `Разрешить этой сессии запись на сервер «${call.host}»? Первый изменяющий вызов: ${call.summary}`;
-  const details = {
-    ...(call.details || {}),
-    'что это значит': 'Разрешение на сервер целиком до конца сессии: shell, файлы, docker и база. '
-      + 'Отказ закрывает запись на этот сервер до конца сессии, чтение остаётся.',
+function accessQuestion(call, need, known) {
+  if (need === 'read') {
+    return {
+      choices: ['read', 'write'],
+      summary: `Разрешить этой сессии доступ к «${call.key}»? Первый вызов: ${call.summary}`,
+      meaning: 'Разрешение пользователю на этом сервере до конца сессии: shell, файлы, docker и база. '
+        + '«Только чтение» — читающие вызовы дальше без вопросов, первая запись спросит ещё раз. '
+        + '«Чтение и запись» — без вопросов и запись. Отказ закрывает доступ до конца сессии.',
+    };
+  }
+  const offerRead = known.read === undefined && cfg.approval !== 'write';
+  return {
+    choices: offerRead ? ['write', 'read'] : ['write'],
+    summary: `Разрешить этой сессии запись на «${call.key}»? Первый изменяющий вызов: ${call.summary}`,
+    meaning: 'Разрешение на запись пользователю на этом сервере до конца сессии: shell, файлы, docker и база. '
+      + (offerRead ? '«Только чтение» — этот вызов не выполнится, читающие пройдут без вопросов. ' : '')
+      + 'Отказ закрывает запись до конца сессии, чтение остаётся.',
   };
-  const decision = await ask(ctx, { tool: call.tool, target: call.target, summary, details });
-  grants.set(ctx.sessionId, call.host, decision.status === 'approved');
-  if (decision.status !== 'approved') throw new Declined({ ...base, ...decision }, call.summary);
+}
+
+/** Доступ к user@host: уровень спрашивается один раз за сессию, ответ — и отказ тоже — запоминается. */
+async function perAccess(ctx, call) {
+  const need = call.mutating ? 'write' : 'read';
+  if (need === 'read' && cfg.approval === 'write') return { required: false };
+
+  const base = { required: true, scope: 'access', key: call.key, need };
+  const known = grants.get(ctx.sessionId, call.key);
+
+  if (known[need] === false) throw new Declined({ ...base, status: 'declined', granted: 'ранее' }, call.summary);
+  if (known[need]) return { ...base, status: 'approved', level: need, granted: 'ранее в этой сессии' };
+
+  const question = accessQuestion(call, need, known);
+  const decision = await ask(ctx, {
+    tool: call.tool,
+    target: call.target,
+    summary: question.summary,
+    details: { ...(call.details || {}), 'что это значит': question.meaning },
+    choices: question.choices,
+  });
+
+  if (decision.status !== 'approved') {
+    grants.deny(ctx.sessionId, call.key, need);
+    throw new Declined({ ...base, ...decision }, call.summary);
+  }
+
+  grants.grant(ctx.sessionId, call.key, decision.level);
+  if (need === 'write' && decision.level !== 'write') {
+    grants.deny(ctx.sessionId, call.key, 'write');
+    throw new Declined({ ...base, ...decision, status: 'declined', readOnly: true }, call.summary);
+  }
   return { ...base, ...decision };
 }
 
@@ -142,14 +220,15 @@ function guardCall(call) {
 /**
  * Пропускает вызов или бросает Declined. Возвращает запись для журнала: по ней видно,
  * спрашивали ли человека сейчас или действие прошло по выданному раньше разрешению.
+ * call.key — user@host; без него вызов не удалённый и доступ не спрашивается.
  */
 export async function authorize(ctx, call) {
   let record = { required: false };
   let questions = 0;
 
   try {
-    if (call.mutating && call.host && cfg.approval !== 'off') {
-      record = await perHost(ctx, call);
+    if (call.key && cfg.approval !== 'off') {
+      record = await perAccess(ctx, call);
       if (record.id) questions++;
     }
     // readonly спрашивает про каждый похожий на запись вызов и после выданного на сервер

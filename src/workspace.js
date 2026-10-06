@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { cfg } from './config.js';
-import { DIRS } from './paths.js';
+import { DIRS, TOOLS_BIN } from './paths.js';
 
 // Рабочая область — единственное место обмена файлами. Загрузка с машины человека
 // (/upload), скачанное с сервера (files_get), дамп базы, вывод команды — всё ложится
@@ -105,4 +105,26 @@ export function* walk(dir, prefix = '') {
       yield { rel, full, dir: false };
     }
   }
+}
+
+/** Описание скрипта — первая строка-комментарий после шебанга. */
+function summaryOf(file) {
+  let head = '';
+  try { head = fs.readFileSync(file, 'utf8').slice(0, 2048); } catch { return null; }
+  const lines = head.split('\n').slice(0, 5);
+  if (lines[0]?.startsWith('#!')) lines.shift();
+  const line = lines.find((l) => /^\s*(#|\/\/|--)/.test(l));
+  return line ? line.replace(/^\s*(#+|\/\/+|--)\s*/, '').trim() || null : null;
+}
+
+/** Инструменты, которые агент написал себе: tools/bin с описаниями. */
+export function ownTools() {
+  const dir = path.join(DIRS.workspace, TOOLS_BIN);
+  let names = [];
+  try {
+    names = fs.readdirSync(dir, { withFileTypes: true }).filter((e) => e.isFile()).map((e) => e.name).sort();
+  } catch {
+    return []; // каталога ещё нет
+  }
+  return names.map((name) => ({ name, about: summaryOf(path.join(dir, name)) }));
 }

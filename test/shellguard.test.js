@@ -26,6 +26,13 @@ const READS = [
   'php artisan route:list',
   'cat <<EOF\nrm -rf /\nEOF',
   'test -f x && echo yes',
+  'python3 --version && node -v',
+  'tar -tzf backup.tar.gz | head',
+  'unzip -l site.zip',
+  'gzip -dc access.log.gz | tail',
+  'curl -s https://example.com/health',
+  'wget -qO- https://example.com/health',
+  'curl -o /dev/null -w "%{http_code}" https://example.com',
 ];
 
 const WRITES = [
@@ -57,6 +64,18 @@ const WRITES = [
   ['echo $(touch /tmp/x)', /touch/],
   ['FOO=1 nohup rm x &', /rm/],
   ['cat <<EOF > /tmp/x.php\n<?php echo 1;\nEOF', /запись в файл \/tmp\/x\.php/],
+  ['python3 -c "import os; os.remove(\'x\')"', /python3: код не разбирается/],
+  ['php -r "unlink(\'x\');"', /php: код не разбирается/],
+  ['php cleanup.php', /php: код не разбирается/],
+  ['node script.js', /node: код не разбирается/],
+  ['bash deploy.sh', /bash: скрипт файлом/],
+  ['tar -xzf backup.tar.gz', /tar x/],
+  ['tar czf out.tgz site', /tar c/],
+  ['unzip site.zip', /unzip/],
+  ['gzip access.log', /gzip/],
+  ['wget https://example.com/a.zip', /wget/],
+  ['curl -o a.zip https://example.com/a.zip', /curl -o/],
+  ['curl -O https://example.com/a.zip', /curl -O/],
 ];
 
 test('читающие команды приметы не дают', () => {

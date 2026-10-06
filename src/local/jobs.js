@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { cfg } from '../config.js';
-import { DIRS, ensureDirs } from '../paths.js';
+import { DIRS, ensureDirs, TOOLS_BIN } from '../paths.js';
 import { newId } from '../audit/log.js';
 import { scrub } from '../secrets.js';
 import { fallbackEnv, versionsHost, markDown, FAILED_ON_HOST } from './reach.js';
@@ -33,11 +33,12 @@ export function childEnv(extra = {}) {
   // версий. Ставится здесь, а не только в образе: в бандле окружение задаёт supervisord.
   Object.assign(env, fallbackEnv(env));
 
-  if (env.MISE_DATA_DIR) {
-    const shims = `${env.MISE_DATA_DIR}/shims`;
-    const parts = (env.PATH || '').split(':').filter((part) => part && part !== shims);
-    env.PATH = [shims, ...parts].join(':');
-  }
+  // Следом — tools/bin рабочей области: скрипты, которые агент написал себе, вызываются по
+  // имени. После шимов, чтобы скрипт не подменил собой python или php.
+  const own = path.join(DIRS.workspace, TOOLS_BIN);
+  const shims = env.MISE_DATA_DIR ? [`${env.MISE_DATA_DIR}/shims`] : [];
+  const parts = (env.PATH || '').split(':').filter((part) => part && !shims.includes(part) && part !== own);
+  env.PATH = [...shims, own, ...parts].join(':');
   return { ...env, ...extra };
 }
 

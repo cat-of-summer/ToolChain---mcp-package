@@ -100,10 +100,12 @@ export const tools = [
     description: pick({
       ru: 'Выполняет команду bash в контейнере стенда, в рабочей области: pip/composer/npm install, сборка, '
         + 'тесты, скрипты над скачанными файлами, git clone. tools — версии mise на этот вызов '
-        + '(недостающие ставятся сами). Долгое уходит в фон задачей.',
+        + '(недостающие ставятся сами). Долгое уходит в фон задачей. Свои скрипты из tools/bin '
+        + 'вызываются по имени — help tools.',
       en: 'Runs a bash command in the toolkit container, inside the workspace: pip/composer/npm install, '
         + 'builds, tests, scripts over downloaded files, git clone. tools — mise versions for this call '
-        + '(missing ones get installed). Long runs move to a background job.',
+        + '(missing ones get installed). Long runs move to a background job. Your own scripts in tools/bin '
+        + 'are called by name — help tools.',
     }),
     input: {
       command: z.string(),
@@ -129,9 +131,13 @@ export const tools = [
     title: pick({ ru: 'Выполнить код', en: 'Run code' }),
     description: pick({
       ru: `Сохраняет код в файл и выполняет нужной версией языка. tool: ${Object.keys(RUNNERS).join(', ')} `
-        + '— с версией через @ (python@3.11, php@7.4). Код видит рабочую область по относительным путям.',
+        + '— с версией через @ (python@3.11, php@7.4). Код видит рабочую область по относительным путям. '
+        + 'Языка нет на машине человека — запускайте здесь, а не переходите на bash; повторится — '
+        + 'сохраните скриптом в tools/bin (help tools).',
       en: `Saves code to a file and runs it with the requested language version. tool: ${Object.keys(RUNNERS).join(', ')} `
-        + '— with a version after @ (python@3.11, php@7.4). The code sees the workspace by relative paths.',
+        + '— with a version after @ (python@3.11, php@7.4). The code sees the workspace by relative paths. '
+        + 'The language is missing on the human\'s machine — run it here instead of falling back to bash; '
+        + 'if it will repeat, save it as a script in tools/bin (help tools).',
     }),
     input: {
       tool: z.string().describe('python@3.11'),
