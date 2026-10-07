@@ -34,8 +34,8 @@ export const targetSchema = z.object({
   cwd: z.string().optional().describe(pick({ ru: 'каталог по умолчанию для ssh_*', en: 'default directory for ssh_*' })),
   shell: z.string().optional(),
   readonly: z.boolean().optional().describe(pick({
-    ru: 'каждый похожий на запись вызов спрашивает человека',
-    en: 'every write-like call asks the human',
+    ru: 'каждый похожий на запись вызов спрашивает человека; только по его просьбе',
+    en: 'every write-like call asks the human; only when they ask for it',
   })),
   db: z.object({
     engine: z.enum(['postgres', 'mysql', 'mariadb']),

@@ -11,6 +11,10 @@ import { classify } from './transport/db/sql.js';
 // хитрое экранирование она пропустит — задача ловить случайности, а не злой умысел. Поэтому
 // код интерпретатору (python, php -r, node -e, скрипт файлом) сам по себе примета: что он
 // сделает, не разобрать. Ошибка в эту сторону дешевле: лишний вопрос, а не тихая запись.
+//
+// Функции, определённые в той же команде (`M(){ mysql -e "$1"; }; M "select 1"`), разбираются
+// на месте вызова с подставленными аргументами: в теле `$1` ничего не говорит о запросе.
+// Определённая, но не вызванная функция разбирается как есть.
 
 const SHELLS = new Set(['sh', 'bash', 'dash', 'zsh', 'ksh', 'ash', 'busybox']);
 
@@ -56,6 +60,135 @@ const CODE_FLAGS = new Set(['-c', '-e', '-E', '-r', '-m', '--eval', 'run', 'eval
 const COMPRESSORS = new Set(['gzip', 'gunzip', 'bzip2', 'bunzip2', 'xz', 'unxz', 'zstd', 'unzstd']);
 
 const NULL_TARGETS = new Set(['/dev/null', '/dev/stdout', '/dev/stderr']);
+
+// Заголовок функции: name() { … }, function name { … }, function name() { … }.
+const FUNC_HEAD = /^(?:function\s+([A-Za-z_][\w.-]*)\s*(?:\(\s*\))?|([A-Za-z_][\w.-]*)\s*\(\s*\))\s*\{/;
+const PARAM = /^\$(?:\{(\d)\}|(\d)|\{?([@*])\}?)/;
+
+/** Конец кавычек, обратных кавычек или $( … ) с позиции i; null — здесь их нет. */
+function skipQuoted(s, i) {
+  const ch = s[i];
+  if (ch === "'") {
+    const end = s.indexOf("'", i + 1);
+    return end === -1 ? s.length : end + 1;
+  }
+  if (ch === '`') {
+    let j = i + 1;
+    while (j < s.length && s[j] !== '`') j += s[j] === '\\' ? 2 : 1;
+    return j + 1;
+  }
+  if (ch === '"') {
+    let j = i + 1;
+    while (j < s.length && s[j] !== '"') {
+      const inner = s[j] === '\\' ? null : s.startsWith('$(', j) || s[j] === '`' ? skipQuoted(s, j) : null;
+      j = inner ?? j + (s[j] === '\\' ? 2 : 1);
+    }
+    return j + 1;
+  }
+  if (s.startsWith('$(', i)) {
+    let depth = 1;
+    let j = i + 2;
+    while (j < s.length) {
+      if (s[j] === '\\') { j += 2; continue; }
+      const inner = skipQuoted(s, j);
+      if (inner !== null) { j = inner; continue; }
+      if (s[j] === '(') depth++;
+      else if (s[j] === ')' && --depth === 0) return j + 1;
+      j++;
+    }
+    return s.length;
+  }
+  return null;
+}
+
+/** Индекс `}`, закрывающей тело функции, или -1. */
+function closingBrace(s, from) {
+  let depth = 1;
+  let j = from;
+  while (j < s.length) {
+    if (s[j] === '\\') { j += 2; continue; }
+    const inner = skipQuoted(s, j);
+    if (inner !== null) { j = inner; continue; }
+    if (s[j] === '{') depth++;
+    else if (s[j] === '}' && --depth === 0) return j;
+    j++;
+  }
+  return -1;
+}
+
+/** Вынимает из текста определения функций: текст без них и тела по именам. */
+function functions(text, defs) {
+  const s = String(text);
+  let out = '';
+  let i = 0;
+  let start = true; // здесь может начаться команда
+  while (i < s.length) {
+    const ch = s[i];
+    if (start && !/\s/.test(ch)) {
+      const head = s.slice(i).match(FUNC_HEAD);
+      const close = head ? closingBrace(s, i + head[0].length) : -1;
+      if (close !== -1) {
+        defs.set(head[1] || head[2], s.slice(i + head[0].length, close));
+        out += ';';
+        i = close + 1;
+        start = false;
+        continue;
+      }
+    }
+    if (ch === '\\') { out += s.slice(i, i + 2); i += 2; start = false; continue; }
+    const inner = skipQuoted(s, i);
+    if (inner !== null) { out += s.slice(i, inner); i = inner; start = false; continue; }
+    if (ch === '#' && (i === 0 || /\s/.test(s[i - 1]))) {
+      const end = s.indexOf('\n', i);
+      out += s.slice(i, end === -1 ? s.length : end);
+      i = end === -1 ? s.length : end;
+      continue;
+    }
+    if (';&|\n({'.includes(ch)) start = true;
+    else if (!/\s/.test(ch)) start = false;
+    out += ch;
+    i++;
+  }
+  return out;
+}
+
+const singleQuoted = (value) => `'${value.replace(/'/g, "'\\''")}'`;
+const inDoubleQuotes = (value) => value.replace(/[\\"$`]/g, '\\$&');
+
+/** Тело функции с аргументами вызова на месте $1…$9, $@ и $*. */
+function substitute(body, args) {
+  let out = '';
+  let quoted = false; // внутри "…"
+  let i = 0;
+  while (i < body.length) {
+    const ch = body[i];
+    if (ch === '\\') { out += body.slice(i, i + 2); i += 2; continue; }
+    if (!quoted && (body.startsWith('"$@"', i) || body.startsWith('"${@}"', i))) {
+      out += args.map(singleQuoted).join(' ');
+      i += body.startsWith('"$@"', i) ? 4 : 6;
+      continue;
+    }
+    if (!quoted && (ch === "'" || ch === '`')) {
+      const end = skipQuoted(body, i);
+      out += body.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (ch === '"') { quoted = !quoted; out += ch; i++; continue; }
+    const param = body.slice(i).match(PARAM);
+    if (param) {
+      const n = param[1] ?? param[2];
+      const value = n !== undefined ? (args[Number(n) - 1] ?? '') : args.join(' ');
+      if (quoted) out += inDoubleQuotes(value);
+      else out += n !== undefined ? singleQuoted(value) : args.map(singleQuoted).join(' ');
+      i += param[0].length;
+      continue;
+    }
+    out += ch;
+    i++;
+  }
+  return out;
+}
 
 /** Разбивает текст на простые команды: слова и перенаправления. */
 function lex(text) {
@@ -236,7 +369,7 @@ function sqlArg(args) {
   return null;
 }
 
-function inspectCommand(words, redirs, depth, signs) {
+function inspectCommand(words, redirs, depth, signs, fns) {
   for (const r of redirs) {
     if (r.op.startsWith('>') && !NULL_TARGETS.has(r.target)) signs.push(`запись в файл ${r.target}`);
   }
@@ -246,16 +379,21 @@ function inspectCommand(words, redirs, depth, signs) {
   const name = base(argv[0]);
   const args = argv.slice(1);
 
+  if (fns.defs.has(argv[0]) && depth < 4) {
+    fns.called.add(argv[0]);
+    collect(substitute(fns.defs.get(argv[0]), args), depth + 1, signs, fns);
+    return;
+  }
   if (SHELLS.has(name)) {
     const c = args.indexOf('-c');
-    if (c >= 0 && args[c + 1] !== undefined && depth < 4) collect(args[c + 1], depth + 1, signs);
+    if (c >= 0 && args[c + 1] !== undefined && depth < 4) collect(args[c + 1], depth + 1, signs, fns);
     else if (c < 0 && args.some((a) => !a.startsWith('-'))) signs.push(`${name}: скрипт файлом не разбирается`);
     return;
   }
   if (name === 'find' && args.some((a) => a === '-delete' || a === '-exec' || a === '-execdir')) {
     if (args.includes('-delete')) signs.push('find -delete');
     const exec = args.findIndex((a) => a === '-exec' || a === '-execdir');
-    if (exec >= 0) inspectCommand(args.slice(exec + 1).filter((a) => a !== ';' && a !== '{}' && a !== '+'), [], depth + 1, signs);
+    if (exec >= 0) inspectCommand(args.slice(exec + 1).filter((a) => a !== ';' && a !== '{}' && a !== '+'), [], depth + 1, signs, fns);
     return;
   }
   if (ALWAYS.has(name)) {
@@ -352,10 +490,10 @@ function inspectCommand(words, redirs, depth, signs) {
   }
 }
 
-function collect(text, depth, signs) {
-  const { segments, nested } = lex(text);
-  for (const segment of segments) inspectCommand(segment.words, segment.redirs, depth, signs);
-  if (depth < 4) for (const inner of nested) collect(inner, depth + 1, signs);
+function collect(text, depth, signs, fns) {
+  const { segments, nested } = lex(functions(text, fns.defs));
+  for (const segment of segments) inspectCommand(segment.words, segment.redirs, depth, signs, fns);
+  if (depth < 4) for (const inner of nested) collect(inner, depth + 1, signs, fns);
 }
 
 /**
@@ -364,7 +502,9 @@ function collect(text, depth, signs) {
  */
 export function writeSigns(text) {
   const signs = [];
-  collect(String(text ?? ''), 0, signs);
+  const fns = { defs: new Map(), called: new Set() };
+  collect(String(text ?? ''), 0, signs, fns);
+  for (const [name, body] of fns.defs) if (!fns.called.has(name)) collect(body, 1, signs, fns);
   return [...new Set(signs)];
 }
 

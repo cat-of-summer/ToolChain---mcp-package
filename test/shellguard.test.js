@@ -33,6 +33,14 @@ const READS = [
   'curl -s https://example.com/health',
   'wget -qO- https://example.com/health',
   'curl -o /dev/null -w "%{http_code}" https://example.com',
+  // Функция-обёртка над клиентом базы: запрос виден только на месте вызова.
+  'M(){ mysql -uX db -e "$1" 2>&1; }; M "show tables"; M "select 1"',
+  'function q { psql -c "$1"; }; q "select now()"',
+  'export MYSQL_PWD="$(grep -m1 ^DB_PASSWORD= .env | cut -d= -f2- | sed \'s/^"//;s/"$//\')"; '
+    + 'M(){ mysql -ubimmer -h127.0.0.1 shop -N -e "$1" 2>&1; }; '
+    + 'for t in $(M "select table_name from information_schema.columns where column_name=\'token\'"); '
+    + 'do echo "== $t"; M "select * from \\`$t\\` where token like \'41%\'"; done',
+  'M(){ mysql -e "$1"; }; M "select \'it\'\'s\'"; M "select \\"x\\""',
 ];
 
 const WRITES = [
@@ -76,6 +84,12 @@ const WRITES = [
   ['wget https://example.com/a.zip', /wget/],
   ['curl -o a.zip https://example.com/a.zip', /curl -o/],
   ['curl -O https://example.com/a.zip', /curl -O/],
+  ['M(){ mysql -e "$1"; }; M "select 1"; M "delete from users"', /mysql: delete/],
+  ['f(){ rm -rf "$1"; }; f /tmp/x', /rm/],
+  ['run(){ "$@"; }; run rm -rf /tmp/x', /rm/],
+  ['g(){ echo "$*" > /tmp/out; }; g a b', /запись в файл \/tmp\/out/],
+  ['M(){ mysql -e "$1"; }', /mysql: запрос/], // не вызвана — запрос не виден
+  ['echo "f(){ " ; rm x; echo "}"', /rm/], // «определение» в кавычках — это данные
 ];
 
 test('читающие команды приметы не дают', () => {
