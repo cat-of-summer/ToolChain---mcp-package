@@ -1,4 +1,5 @@
 # Мишени для сквозной проверки стенда: два сервера с SSH, две базы за ними и FTP.
+# На первом сервере базы видны и Unix-сокетами (test-fixtures/sshd/db-sockets.sh) — для db.socket.
 #
 # Базы стоят в отдельной сети, к которой стенд не подключён, и наружу не публикуются.
 # Это не осторожность, а суть проверки: если db_query отвечает, значит он дошёл до базы
@@ -23,6 +24,7 @@ services:
     volumes:
       - ./test-fixtures/sshd/10-enable-forwarding.sh:/custom-cont-init.d/10-enable-forwarding.sh:ro
       - ./test-fixtures/sshd/20-hosting-tools.sh:/custom-cont-init.d/20-hosting-tools.sh:ro
+      - ./test-fixtures/sshd/db-sockets.sh:/custom-services.d/db-sockets:ro
     networks:
       - network
       - behind

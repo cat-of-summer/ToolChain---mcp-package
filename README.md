@@ -193,7 +193,13 @@ php 5 и 7 не собираются с OpenSSL 3 из Debian bookworm (`ext/ope
 
 - `proto: ftp | ftps` — сервер только с FTP: работают `files_*`.
 - `db.via`: `tunnel` (по умолчанию) — драйвер через SSH-туннель, порт базы наружу не нужен;
-  `exec` — `psql`/`mysql` на самом сервере, для хостингов без проброса; `direct` — по сети без SSH.
+  `exec` - `psql`/`mysql` на самом сервере, для хостингов без проброса; `direct` - по сети без SSH.
+  В `exec` клиент берётся `mariadb` или `mysql` (дамп - `mariadb-dump` или `mysqldump`), что нашлось.
+- `db.socket` - Unix-сокет базы на сервере вместо `db.host`: когда у пользователя базы права только
+  на `localhost` и по TCP с `127.0.0.1` он не входит. Путь - `/run/mysqld/mysqld.sock`, у postgres -
+  каталог `/var/run/postgresql` или файл `.s.PGSQL.5432`. Работает в `tunnel` (проброс сокета по SSH,
+  нужен `AllowStreamLocalForwarding yes`) и в `exec`. Отказ "Access denied … @'127.0.0.1'" сам
+  подсказывает это поле.
 - `readonly: true` — каждый похожий на запись вызов спрашивает человека. Ставится по просьбе человека:
   для работы только на чтение хватает `access: "read"`.
 

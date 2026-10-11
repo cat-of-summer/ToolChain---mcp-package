@@ -6,3 +6,5 @@ apk add --no-cache mariadb-client mariadb-connector-c >/dev/null 2>&1 || true
 for pkg in postgresql17-client postgresql16-client postgresql-client; do
   apk add --no-cache "$pkg" >/dev/null 2>&1 && break
 done
+# socat держит сокеты баз (сервис db-sockets): «база слушает только сокет», для db.socket.
+apk add --no-cache socat >/dev/null 2>&1 || true
