@@ -186,12 +186,39 @@ function client(engine) {
   return engine === 'postgres' ? 'psql' : 'mysql';
 }
 
+// На свежих MariaDB mysql и mysqldump остались только в пакете совместимости, а у MySQL нет
+// mariadb. Берём первое, что нашлось; не нашлось ничего — оболочка ответит кодом 127.
+const ALTERNATIVES = { mysql: ['mariadb', 'mysql'], mysqldump: ['mariadb-dump', 'mysqldump'] };
+
+/** Программа для строки команды: подстановка оболочки, если у неё есть второе имя. */
+export function program(name) {
+  const names = ALTERNATIVES[name];
+  if (!names) return quote(name);
+  return `"$(${names.map((n) => `command -v ${n}`).join(' || ')} || echo ${name})"`;
+}
+
+const missing = (name) => (ALTERNATIVES[name] || [name]).join(' и ');
+
+/**
+ * Отказ во входе по TCP с 127.0.0.1 — частый случай хостинга: пользователь заведён на localhost,
+ * а это вход через сокет. Подсказываем, но сами не переключаемся: от адреса зависит учётка.
+ */
+export function explainDenied(message, { socket } = {}) {
+  if (socket) return message;
+  const mysqlDenied = /Access denied for user '[^']*'@'(127\.0\.0\.1|::1|localhost)'/i.test(message);
+  const pgDenied = /no pg_hba\.conf entry for host "(127\.0\.0\.1|::1)"/i.test(message);
+  if (!mysqlDenied && !pgDenied) return message;
+  return `${message}. Если пользователь базы заведён только на localhost, по TCP ему не войти — `
+    + 'откройте цель с db.socket: путь к сокету базы на сервере (/run/mysqld/mysqld.sock, /var/run/postgresql)';
+}
+
 /** Команда клиента и переменная с паролем. SQL в команду не входит — он идёт в stdin. */
-function command(endpoint, engine, timeoutMs) {
+export function command(endpoint, engine, timeoutMs) {
   if (engine === 'postgres') {
     return {
+      // Каталог сокета psql принимает тем же -h.
       line: ['psql', '-X', '-v', 'ON_ERROR_STOP=1', '--csv', '-P', `null=${NULL_MARK}`,
-        '-h', endpoint.host, '-p', String(endpoint.port), '-U', endpoint.username, '-d', endpoint.database]
+        '-h', endpoint.socket || endpoint.host, '-p', String(endpoint.port), '-U', endpoint.username, '-d', endpoint.database]
         .map(quote).join(' '),
       // Серверный потолок, как у драйвера: клиентский таймаут запрос не отменяет.
       vars: {
@@ -203,9 +230,12 @@ function command(endpoint, engine, timeoutMs) {
       },
     };
   }
-  const line = ['mysql', '--xml', '--default-character-set=utf8mb4', '-h', endpoint.host, '-P', String(endpoint.port),
-    '-u', endpoint.username, endpoint.database];
-  return { line: line.map(quote).join(' '), vars: endpoint.password ? { MYSQL_PWD: endpoint.password } : {} };
+  const address = endpoint.socket ? [`--socket=${endpoint.socket}`] : ['-h', endpoint.host, '-P', String(endpoint.port)];
+  const args = ['--xml', '--default-character-set=utf8mb4', ...address, '-u', endpoint.username, endpoint.database];
+  return {
+    line: [program('mysql'), ...args.map(quote)].join(' '),
+    vars: endpoint.password ? { MYSQL_PWD: endpoint.password } : {},
+  };
 }
 
 async function run(conn, sql, { engine, readonly }) {
@@ -220,9 +250,13 @@ async function run(conn, sql, { engine, readonly }) {
   if (res.truncated) {
     throw new Error(`ответ ${client(engine)} больше TK_MAX_OUTPUT_BYTES — сузьте выборку или снимите db_dump`);
   }
+  if (res.code === 127) throw new Error(`на сервере нет ${missing(client(engine))}`);
   if (res.code !== 0) {
     const message = res.stderr.trim().split('\n').filter((l) => !/Using a password/i.test(l)).join(' ').slice(0, 500);
-    throw new Error(`${client(engine)} на сервере завершился с кодом ${res.code}: ${message || 'без сообщения'}`);
+    throw new Error(explainDenied(
+      `${client(engine)} на сервере завершился с кодом ${res.code}: ${message || 'без сообщения'}`,
+      conn.endpoint,
+    ));
   }
   return res.stdout;
 }
@@ -284,13 +318,20 @@ export async function dump(conn, argv, { outFile, secrets }) {
   const vars = conn.endpoint.password
     ? (conn.engine === 'postgres' ? { PGPASSWORD: conn.endpoint.password } : { MYSQL_PWD: conn.endpoint.password })
     : {};
-  const res = await exec(conn.ssh, argv.map(quote).join(' '), {
+  const line = [program(argv[0]), ...argv.slice(1).map(quote)].join(' ');
+  const res = await exec(conn.ssh, line, {
     vars,
     stdoutTo: { file: outFile, secrets },
     timeoutMs: conn.timeoutMs,
   });
   const message = res.stderr.trim().split('\n').filter((l) => !/Using a password/i.test(l)).join('\n').trim();
   if (res.timedOut) throw new Error(`${argv[0]} на сервере не уложился в таймаут`);
-  if (res.code !== 0) throw new Error(`${argv[0]} на сервере завершился с кодом ${res.code}: ${message || 'без сообщения'}`);
+  if (res.code === 127) throw new Error(`на сервере нет ${missing(argv[0])}`);
+  if (res.code !== 0) {
+    throw new Error(explainDenied(
+      `${argv[0]} на сервере завершился с кодом ${res.code}: ${message || 'без сообщения'}`,
+      conn.endpoint,
+    ));
+  }
   return { bytes: res.file.bytes, sha256: res.file.sha256, warning: message || null };
 }

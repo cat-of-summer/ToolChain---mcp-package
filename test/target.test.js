@@ -57,6 +57,21 @@ test('цель без host и негодное имя отклоняются', (
   }), 'база в облаке без SSH обходится без host');
 });
 
+test('db.socket: только через сервер и без db.host', async () => {
+  assert.throws(() => targets.open('s5', 'x', {
+    db: { engine: 'mysql', database: 'd', user: 'u', host: 'db.cloud', socket: '/run/mysqld/mysqld.sock', via: 'direct' },
+  }), /db.via: direct/);
+  assert.throws(() => targets.open('s5', 'x', {
+    host: 'h', db: { engine: 'mysql', database: 'd', user: 'u', host: '127.0.0.1', socket: '/run/mysqld/mysqld.sock' },
+  }), /и host, и socket/);
+
+  const { resolved } = await targets.materialize({
+    host: 'h', db: { engine: 'mysql', database: 'd', user: 'u', socket: '/run/mysqld/mysqld.sock', via: 'exec' },
+  }, { kind: 'db', label: 'sock' });
+  assert.equal(resolved.config.socket, '/run/mysqld/mysqld.sock');
+  assert.equal(resolved.config.via, 'exec');
+});
+
 test('materialize разрешает секреты и собирает объект транспорта', async () => {
   fs.mkdirSync(path.join(ws.ensure(), 'keys'), { recursive: true });
   fs.writeFileSync(path.join(ws.ensure(), 'keys', 'pw'), 'пароль-из-файла\n');

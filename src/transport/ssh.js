@@ -309,6 +309,16 @@ export function forwardOut(client, address, port) {
   });
 }
 
+/** То же до Unix-сокета на хосте: база видит вход через сокет, то есть пользователя @localhost. */
+export function forwardOutSocket(client, socketPath) {
+  return new Promise((resolve, reject) => {
+    client.openssh_forwardOutStreamLocal(socketPath, (err, stream) => {
+      if (err) return reject(err);
+      resolve(stream);
+    });
+  });
+}
+
 export function sftp(client) {
   return new Promise((resolve, reject) => {
     client.sftp((err, handle) => (err ? reject(err) : resolve(handle)));

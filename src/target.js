@@ -43,9 +43,10 @@ export const targetSchema = z.object({
     user: z.string(),
     password: secret.optional(),
     host: z.string().optional().describe(pick({
-      ru: 'адрес базы со стороны сервера, по умолчанию 127.0.0.1',
-      en: 'DB address as seen from the server, default 127.0.0.1',
+      ru: 'адрес базы с сервера (127.0.0.1); права только на localhost — socket',
+      en: 'DB address from the server (127.0.0.1); grants on localhost only — socket',
     })),
+    socket: z.string().optional(),
     port: z.number().int().positive().optional(),
     ssl: z.boolean().optional(),
     via: z.enum(['tunnel', 'exec', 'direct']).optional().describe(pick({
@@ -152,6 +153,10 @@ function validate(target) {
   const parsed = targetSchema.parse(target);
   if (!parsed.host && parsed.db?.via !== 'direct') throw new Error('у цели не задан host');
   if (parsed.db?.via === 'direct' && !parsed.db.host) throw new Error('db.via: direct требует db.host');
+  if (parsed.db?.socket) {
+    if (parsed.db.via === 'direct') throw new Error('db.socket виден только с сервера — с db.via: direct он не работает');
+    if (parsed.db.host) throw new Error('у db заданы и host, и socket — оставьте что-то одно');
+  }
   return parsed;
 }
 
@@ -285,6 +290,7 @@ export async function materialize(target, { kind, label }) {
     resolved.config = {
       engine: db.engine,
       address: db.host || '127.0.0.1',
+      socket: db.socket,
       database: db.database,
       username: db.user,
       ssl: db.ssl,

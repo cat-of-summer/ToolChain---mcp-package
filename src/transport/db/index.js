@@ -37,11 +37,17 @@ export async function withDb(resolved, { approveHostKey, readOnly = false } = {}
   if (!creds.database) throw new Error(`у «${resolved.alias}» не задано имя базы`);
   if (!creds.username) throw new Error(`у «${resolved.alias}» не задан пользователь базы`);
 
-  const port = resolved.port;
+  // Сокет базы на сервере: postgres задают каталогом или файлом, и порт может прийти из имени файла.
+  const postgres = resolved.config.engine === 'postgres';
+  const socket = resolved.config.socket
+    ? (postgres ? pg.socketPaths(resolved.config.socket, resolved.port) : { dir: resolved.config.socket, file: resolved.config.socket, port: resolved.port })
+    : null;
+  const port = socket?.port ?? resolved.port;
 
   if (onServer(resolved)) {
     const endpoint = {
       host: creds.address || '127.0.0.1',
+      socket: socket?.dir,
       port,
       database: creds.database,
       username: creds.username,
@@ -49,12 +55,16 @@ export async function withDb(resolved, { approveHostKey, readOnly = false } = {}
       readOnly,
     };
     const client = await remote.open(resolved, endpoint, { approveHostKey, timeoutMs: cfg.execTimeoutMs });
-    const via = `${resolved.host.alias}: ${resolved.config.engine === 'postgres' ? 'psql' : 'mysql'} на сервере`;
+    const via = `${resolved.host.alias}: ${postgres ? 'psql' : 'mysql'} на сервере${socket ? ` через ${socket.file}` : ''}`;
     return await fn({ client, driver: remote.driverFor(resolved.config.engine), endpoint, via, remote: true });
   }
 
   const driver = driverOf(resolved);
-  const target = { ...resolved, config: { ...resolved.config, address: creds.address || resolved.config.address }, port };
+  const target = {
+    ...resolved,
+    config: { ...resolved.config, address: creds.address || resolved.config.address, socket: socket?.file },
+    port,
+  };
   const channel = await tunnel.open(target, { approveHostKey });
 
   const endpoint = {
@@ -74,7 +84,13 @@ export async function withDb(resolved, { approveHostKey, readOnly = false } = {}
 
   let client = null;
   try {
-    client = await driver.open(endpoint);
+    try {
+      client = await driver.open(endpoint);
+    } catch (err) {
+      // Сокет есть только по ту сторону SSH: облачной базе (direct) советовать его незачем.
+      if (resolved.host) err.message = remote.explainDenied(err.message, { socket: target.config.socket });
+      throw err;
+    }
     const via = channel.direct ? 'напрямую' : channel.via;
     return await fn({ client, driver, endpoint, via, remote: false });
   } finally {

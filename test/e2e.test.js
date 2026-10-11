@@ -210,7 +210,34 @@ for (const engine of ['postgres', 'mysql']) {
   });
 }
 
-test('readonly спрашивает про каждую запись', { skip: !enabled }, async (t) => {
+// Сокеты на sshd_test держит socat (test-fixtures/sshd/db-sockets.sh): база «слушает только сокет».
+const SOCKETS = { postgres: '/var/run/postgresql', mysql: '/run/mysqld/mysqld.sock' };
+
+for (const engine of ['postgres', 'mysql']) {
+  for (const via of ['tunnel', 'exec']) {
+    test(`${engine}: db.socket через ${via}`, { skip: !enabled }, async (t) => {
+      const { client } = await connect(t);
+      await call(client, 'conn_open', {
+        name: 'sock',
+        target: { ...SSH, db: { engine, socket: SOCKETS[engine], via, database: 'shop', user: 'shop', password: DB_PASSWORD } },
+      });
+
+      const res = await call(client, 'db_query', { conn: 'sock', sql: 'SELECT 1 AS one' });
+      assert.equal(res.isError, false, res.text);
+      assert.deepEqual(res.json.rows, [[1]]);
+      assert.match(res.json.via, /\.sock|\.s\.PGSQL\.5432/, 'канал ведёт на сокет');
+
+      const tables = await call(client, 'db_tables', { conn: 'sock' });
+      assert.equal(tables.isError, false, tables.text);
+
+      const dump = await call(client, 'db_dump', { conn: 'sock', schemaOnly: true, to: `dumps/${engine}-${via}-socket.sql` });
+      assert.equal(dump.isError, false, dump.text);
+      assert.equal(dump.text.includes(DB_PASSWORD), false);
+    });
+  }
+}
+
+test('readonly спрашивает про каждую запись',{ skip: !enabled }, async (t) => {
   const { client, asked } = await connect(t, 'accept');
   await call(client, 'conn_open', { name: 'ro', target: { ...SSH, readonly: true } });
 

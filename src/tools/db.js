@@ -64,6 +64,7 @@ export const tools = [
     details: (args, info) => ({
       база: `${info.target.db.engine} ${info.target.db.database}`,
       сервер: info.target.db.via === 'direct' ? info.target.db.host : info.label,
+      ...(info.target.db.socket ? { сокет: info.target.db.socket } : {}),
       параметры: args.params,
     }),
     run: async (args, { resolved, approveHostKey }) => {

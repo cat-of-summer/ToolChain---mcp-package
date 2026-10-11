@@ -47,8 +47,20 @@ export const COLUMNS_SQL = `
   WHERE table_name = $1 AND ($2 = '' OR table_schema = $2)
   ORDER BY ordinal_position`;
 
-export function dumpArgv({ host, port, database, username }, { table, schemaOnly, dataOnly } = {}) {
-  const argv = ['pg_dump', '--no-owner', '--no-privileges', '-h', host, '-p', String(port), '-U', username];
+/**
+ * Сокет postgres задают каталогом (/var/run/postgresql) или самим файлом .s.PGSQL.<порт>.
+ * psql нужен каталог и порт, пробросу через SSH — файл.
+ */
+export function socketPaths(socket, port) {
+  const m = socket.match(/^(.*)\/\.s\.PGSQL\.(\d+)$/);
+  if (m) return { dir: m[1] || '/', port: Number(m[2]), file: socket };
+  const dir = socket.replace(/\/+$/, '') || '/';
+  return { dir, port, file: `${dir === '/' ? '' : dir}/.s.PGSQL.${port}` };
+}
+
+export function dumpArgv({ host, port, socket, database, username }, { table, schemaOnly, dataOnly } = {}) {
+  // У psql и pg_dump каталог сокета передаётся тем же -h.
+  const argv = ['pg_dump', '--no-owner', '--no-privileges', '-h', socket || host, '-p', String(port), '-U', username];
   if (schemaOnly) argv.push('--schema-only');
   if (dataOnly) argv.push('--data-only');
   if (table) argv.push('-t', table);

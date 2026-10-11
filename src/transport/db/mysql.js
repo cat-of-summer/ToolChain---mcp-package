@@ -44,8 +44,9 @@ export const COLUMNS_SQL = `
   WHERE table_name = ? AND table_schema = DATABASE()
   ORDER BY ordinal_position`;
 
-export function dumpArgv({ host, port, database, username }, { table, schemaOnly, dataOnly } = {}) {
-  const argv = ['mysqldump', '--single-transaction', '--skip-lock-tables', '--no-tablespaces', '-h', host, '-P', String(port), '-u', username];
+export function dumpArgv({ host, port, socket, database, username }, { table, schemaOnly, dataOnly } = {}) {
+  const address = socket ? [`--socket=${socket}`] : ['-h', host, '-P', String(port)];
+  const argv = ['mysqldump', '--single-transaction', '--skip-lock-tables', '--no-tablespaces', ...address, '-u', username];
   if (schemaOnly) argv.push('--no-data');
   if (dataOnly) argv.push('--no-create-info');
   argv.push(database);

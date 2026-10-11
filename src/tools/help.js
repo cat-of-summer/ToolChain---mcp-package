@@ -90,7 +90,7 @@ background: true — сразу в фон (dev-сервер); timeout: 0 — б�
 
   targets: `Цель — сервер, куда идёт вызов: host, port, user, password|key, proto (ssh|ftp|ftps),
 root (база для относительных путей files_*), cwd (каталог ssh_*), readonly,
-db {engine, database, user, password, host, port, via: tunnel|exec|direct}, docker {container, composeFile, workdir, sudo}.
+db {engine, database, user, password, host|socket, port, via: tunnel|exec|direct}, docker {container, composeFile, workdir, sudo}.
 
 conn_open(name, target) запоминает цель до конца сессии MCP, на диск ничего не пишется. Дальше
 инструментам хватает conn: "name". Разово можно передать адрес: ssh://user@host:22/var/www,
@@ -99,8 +99,10 @@ sftp://…, ftp://user:pass@host/htdocs, ftps://….
 Ключ SSH-сервера, увиденного впервые, закрепляется (state/known_hosts.json). Смена ключа — отказ;
 заменить его можно, открыв цель с hostKey: "SHA256:…" — и человек это подтвердит.
 db.via: tunnel — драйвер через SSH-туннель (порт базы наружу не нужен), exec — psql/mysql на самом
-сервере (хостинги без проброса), direct — по сети без SSH (облачная база). Запросы к базе цели —
-db_query/db_tables/db_schema, а не mysql в ssh_exec.`,
+сервере (хостинги без проброса), direct — по сети без SSH (облачная база). Пользователь базы заведён
+только на localhost — по TCP с 127.0.0.1 ему не войти: db.socket — путь к сокету на сервере
+(/run/mysqld/mysqld.sock; у postgres — каталог /var/run/postgresql), работает и в tunnel, и в exec.
+Запросы к базе цели — db_query/db_tables/db_schema, а не mysql в ssh_exec.`,
 
   secrets: `Стенд секретов не хранит. Поле секрета (password, key, passphrase, db.password, значения env)
 принимает:
