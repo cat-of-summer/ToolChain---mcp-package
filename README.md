@@ -300,6 +300,7 @@ docker compose exec node tk mise ls        # mise с окружением сте
 | `TK_FOREGROUND_TIMEOUT` | сколько секунд вызов ждёт команду, прежде чем отдать её в фон |
 | `TK_JOBS_KEEP` | сколько завершённых задач хранить |
 | `TK_EXEC_TIMEOUT` | таймаут команды по умолчанию |
+| `TK_FILES_PARALLEL` | сколько файлов `files_get` и `files_put` передают разом в каталоге; для FTP - число соединений, по умолчанию `8` |
 | `TK_MAX_TEXT_BYTES`, `TK_DB_MAX_ROWS`, `TK_MAX_UPLOAD_BYTES` | потолки ответа, выборки, загрузки |
 | `TK_LOG_MAX_BYTES` | потолок журнала |
 | `MISE_VERSION`, `NODE_APT_PACKAGES` | версия mise и дополнительные пакеты Debian в образе |
