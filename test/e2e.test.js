@@ -189,6 +189,30 @@ test('ftp: файл туда и обратно', { skip: !enabled }, async (t) =
   await call(client, 'files_remove', { conn: 'ftp', path: 'hello.txt' });
 });
 
+test('ftp: каталог туда и обратно несколькими соединениями', { skip: !enabled }, async (t) => {
+  const { client } = await connect(t);
+  await call(client, 'conn_open', { name: 'ftp', target: { host: 'ftp_test', proto: 'ftp', user: 'ftpuser', password: FTP_PASSWORD } });
+
+  const names = Array.from({ length: 12 }, (_, i) => `css/part${i}.css`);
+  await call(client, 'ws_write', { path: 'ftp-site/index.php', content: '<?php echo "ok";' });
+  for (const name of names) await call(client, 'ws_write', { path: `ftp-site/${name}`, content: `/* ${name} */` });
+
+  // Путь относительный и root нет: после создания css/ файлы обязаны лечь не в css/css/.
+  const put = await call(client, 'files_put', { conn: 'ftp', from: 'ftp-site', dest: 'e2e-site' });
+  assert.equal(put.isError, false, put.text);
+  assert.equal(put.json.files, 13);
+
+  const got = await call(client, 'files_get', { conn: 'ftp', path: 'e2e-site', to: 'back/ftp-site' });
+  assert.equal(got.isError, false, got.text);
+  assert.equal(got.json.files, 13);
+  const read = await call(client, 'ws_read', { path: 'back/ftp-site/css/part7.css' });
+  assert.equal(read.json.content, '/* css/part7.css */');
+
+  for (const name of ['index.php', ...names]) await call(client, 'files_remove', { conn: 'ftp', path: `e2e-site/${name}` });
+  await call(client, 'files_remove', { conn: 'ftp', path: 'e2e-site/css', dir: true });
+  await call(client, 'files_remove', { conn: 'ftp', path: 'e2e-site', dir: true });
+});
+
 for (const engine of ['postgres', 'mysql']) {
   test(`${engine}: запрос через SSH-туннель, дамп в рабочую область`, { skip: !enabled }, async (t) => {
     const { client, asked } = await connect(t);

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { withVars } from '../src/transport/ssh.js';
+import { drain } from '../src/transport/files.js';
 import { scrubber, scrubDeep } from '../src/secrets.js';
 
 test('переменные уезжают в stdin, в строке команды только имена', () => {
@@ -47,4 +48,46 @@ test('без секретов поток идёт как есть', () => {
 test('ответ целиком чистится по строкам, структура остаётся', () => {
   const out = scrubDeep({ stdout: 'pw=hunter22', rows: [['hunter22', 1]], n: 5 }, ['hunter22']);
   assert.deepEqual(out, { stdout: 'pw=••••', rows: [['••••', 1]], n: 5 });
+});
+
+test('drain: задачи расходятся по исполнителям, каталог добавляет своё содержимое', async () => {
+  const seen = [];
+  let running = 0;
+  let peak = 0;
+  const leaf = (name) => async (worker) => {
+    running++;
+    peak = Math.max(peak, running);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    seen.push(`${worker}:${name}`);
+    running--;
+  };
+  const dir = async () => ['a', 'b', 'c', 'd', 'e', 'f'].map(leaf);
+
+  await drain(['w1', 'w2', 'w3'], [dir]);
+
+  assert.equal(seen.length, 6);
+  assert.equal(peak, 3, 'разом работают все исполнители, но не больше');
+  assert.ok(new Set(seen.map((s) => s.split(':')[0])).size > 1);
+});
+
+test('drain: первая ошибка останавливает раздачу', async () => {
+  let started = 0;
+  const ok = async () => { started++; await new Promise((resolve) => setTimeout(resolve, 5)); };
+  const bad = async () => { started++; throw new Error('сервер оборвал'); };
+
+  await assert.rejects(drain(['w1'], [ok, bad, ok, ok]), /сервер оборвал/);
+  assert.equal(started, 2);
+});
+
+test('drain: отмена вызова останавливает раздачу', async () => {
+  const ctrl = new AbortController();
+  let done = 0;
+  const task = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    done++;
+    if (done === 2) ctrl.abort(new Error('клиент бросил вызов'));
+  };
+
+  await assert.rejects(drain(['w1'], Array(10).fill(task), { signal: ctrl.signal }), /клиент бросил вызов/);
+  assert.equal(done, 2);
 });

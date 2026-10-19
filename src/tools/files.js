@@ -4,7 +4,7 @@ import { z } from 'zod';
 import { pick } from '../i18n.js';
 import { cfg } from '../config.js';
 import { connParam } from '../target.js';
-import { withFiles, resolvePath, mkdirp } from '../transport/files.js';
+import { withFiles, resolvePath, mkdirp, drain } from '../transport/files.js';
 import * as ws from '../workspace.js';
 
 const GROUP = 'files';
@@ -13,35 +13,49 @@ const GROUP = 'files';
 // с сервера ложится в область, на сервер уходит из области. Дальше с ним работает код
 // (exec, run_code) по относительному пути, а человеку оно отдаётся ссылкой /files/….
 
-/** Скачивает каталог сервера целиком. Симлинки не раскрываются: дерево может зациклиться. */
-async function getTree(api, remote, local, stats) {
-  fs.mkdirSync(local, { recursive: true });
-  for (const entry of await api.list(remote)) {
-    if (entry.name === '.' || entry.name === '..' || entry.link) continue;
-    const from = path.posix.join(remote, entry.name);
-    const to = path.join(local, entry.name);
-    if (entry.dir) {
-      await getTree(api, from, to, stats);
-    } else {
-      await api.downloadTo(from, fs.createWriteStream(to));
-      stats.files++;
-      stats.bytes += fs.statSync(to).size;
+/**
+ * Скачивает каталог сервера целиком, по cfg.filesParallel файлов и каталогов разом.
+ * Симлинки не раскрываются: дерево может зациклиться.
+ */
+async function getTree(pool, remote, local, stats, signal) {
+  const file = (from, to) => async (worker) => {
+    await worker.getFile(from, to);
+    stats.files++;
+    stats.bytes += fs.statSync(to).size;
+  };
+  const dir = (from, to) => async (worker) => {
+    fs.mkdirSync(to, { recursive: true });
+    const more = [];
+    for (const entry of await worker.list(from)) {
+      if (entry.name === '.' || entry.name === '..' || entry.link) continue;
+      const next = entry.dir ? dir : file;
+      more.push(next(path.posix.join(from, entry.name), path.join(to, entry.name)));
     }
-  }
+    return more;
+  };
+
+  await drain(await pool(cfg.filesParallel), [dir(remote, local)], { signal });
 }
 
-async function putTree(api, local, remote, stats) {
+/** Каталоги создаются по порядку одним соединением, файлы уходят параллельно. */
+async function putTree(api, pool, local, remote, stats, signal) {
   await mkdirp(api, remote);
+  const files = [];
   for (const item of ws.walk(local)) {
+    signal?.throwIfAborted();
     const dest = path.posix.join(remote, item.rel);
     if (item.dir) {
       await mkdirp(api, dest);
     } else {
-      await api.writeStream(dest, fs.createReadStream(item.full));
-      stats.files++;
-      stats.bytes += fs.statSync(item.full).size;
+      files.push(async (worker) => {
+        await worker.putFile(item.full, dest);
+        stats.files++;
+        stats.bytes += fs.statSync(item.full).size;
+      });
     }
   }
+
+  await drain(await pool(Math.min(cfg.filesParallel, files.length)), files, { signal });
 }
 
 export const tools = [
@@ -121,16 +135,16 @@ export const tools = [
         en: 'workspace path; defaults to downloads/<name>',
       })),
     },
-    run: async (args, { resolved, approveHostKey }) => {
+    run: async (args, { resolved, approveHostKey, signal }) => {
       const remote = resolvePath(resolved, args.path);
       const local = ws.resolve(args.to || `downloads/${ws.safeName(path.posix.basename(remote))}`);
       const stats = { files: 0, bytes: 0 };
 
-      await withFiles(resolved, { approveHostKey }, async (api) => {
+      await withFiles(resolved, { approveHostKey }, async (api, { pool }) => {
         const info = await api.stat(remote);
-        if (info.dir) return getTree(api, remote, local, stats);
+        if (info.dir) return getTree(pool, remote, local, stats, signal);
         fs.mkdirSync(path.dirname(local), { recursive: true });
-        await api.downloadTo(remote, fs.createWriteStream(local));
+        await api.getFile(remote, local);
         stats.files = 1;
         stats.bytes = fs.statSync(local).size;
         return null;
@@ -160,12 +174,12 @@ export const tools = [
     },
     summary: (args, info) => `Положить на «${info.label}»: ${args.from ? `${args.from} → ` : ''}${args.dest}`,
     details: (args) => ({ источник: args.from || 'текст в параметре content' }),
-    run: async (args, { resolved, approveHostKey }) => {
+    run: async (args, { resolved, approveHostKey, signal }) => {
       const dest = resolvePath(resolved, args.dest);
       if (!args.from && args.content === undefined) throw new Error('нечего класть: передайте from (путь в рабочей области) или content');
 
       const stats = { files: 0, bytes: 0 };
-      await withFiles(resolved, { approveHostKey }, async (api) => {
+      await withFiles(resolved, { approveHostKey }, async (api, { pool }) => {
         if (!args.from) {
           await api.write(dest, Buffer.from(args.content, 'utf8'));
           stats.files = 1;
@@ -174,8 +188,8 @@ export const tools = [
         }
         const local = ws.resolve(args.from);
         if (!fs.existsSync(local)) throw new Error(`в рабочей области нет «${args.from}»`);
-        if (fs.statSync(local).isDirectory()) return putTree(api, local, dest, stats);
-        await api.writeStream(dest, fs.createReadStream(local));
+        if (fs.statSync(local).isDirectory()) return putTree(api, pool, local, dest, stats, signal);
+        await api.putFile(local, dest);
         stats.files = 1;
         stats.bytes = fs.statSync(local).size;
       });

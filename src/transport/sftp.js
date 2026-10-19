@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { Readable, Writable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
@@ -60,16 +61,16 @@ export function make(handle) {
       return { content: Buffer.concat(chunks), truncated, bytes };
     },
 
-    async writeStream(target, source) {
-      await pipeline(source, handle.createWriteStream(target));
-    },
-
     async write(target, buffer) {
       await pipeline(Readable.from(buffer), handle.createWriteStream(target));
     },
 
-    async downloadTo(target, writable) {
-      await pipeline(handle.createReadStream(target), writable);
+    async getFile(target, local) {
+      await pipeline(handle.createReadStream(target), fs.createWriteStream(local));
+    },
+
+    async putFile(local, target) {
+      await pipeline(fs.createReadStream(local), handle.createWriteStream(target));
     },
 
     remove: (target) => call(handle, 'unlink', target),

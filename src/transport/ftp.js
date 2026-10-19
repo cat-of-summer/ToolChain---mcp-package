@@ -60,13 +60,23 @@ export async function open({ address, port, username, password, secure }) {
       return { content: Buffer.concat(chunks), truncated, bytes };
     },
 
-    writeStream: (target, source) => client.uploadFrom(source, target),
     write: (target, buffer) => client.uploadFrom(Readable.from(buffer), target),
-    downloadTo: (target, writable) => client.downloadTo(writable, target),
+    // Локальный файл basic-ftp открывает и закрывает сам: к возврату он дописан на диск.
+    getFile: (target, local) => client.downloadTo(local, target),
+    putFile: (local, target) => client.uploadFrom(local, target),
 
     remove: (target) => client.remove(target),
     rmdir: (target) => client.removeDir(target),
-    mkdir: (target) => client.ensureDir(target),
+    async mkdir(target) {
+      // ensureDir попутно делает cd в созданный каталог, и относительные пути следующих
+      // вызовов на этом соединении уехали бы вглубь. Возвращаемся, где были.
+      const cwd = await client.pwd();
+      try {
+        await client.ensureDir(target);
+      } finally {
+        await client.cd(cwd);
+      }
+    },
     move: (from, to) => client.rename(from, to),
     async chmod(target, mode) {
       // SITE CHMOD поддерживают не все серверы — отвечаем честно, а не молча «ок».

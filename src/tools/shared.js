@@ -134,6 +134,9 @@ export function wrap(def, sessionCtx) {
         approveHostKey: info ? makeHostKeyApprover(ctx, def, info) : undefined,
         secrets,
         addSecret: (value) => { if (value) secrets.push(String(value)); },
+        // Клиент бросил вызов по таймауту — долгий обход дерева останавливается, а не пишет
+        // дальше в каталог, который агент уже считает свободным.
+        signal: extra.signal,
       });
 
       const payload = result?.data ?? result ?? null;
