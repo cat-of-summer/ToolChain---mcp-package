@@ -20,6 +20,9 @@ services:
       # системе Windows теряются биты исполнения и симлинки, а сборка php там ползёт.
       - workspace:/var/www/html/workspace
       - tools:/var/www/html/tools
+      # Папка проектов хоста — на чтение и запись: агент запускает php -l, composer и тесты прямо
+      # в проекте, а не поднимает ради этого свой контейнер с php. Не задана — пустой ./projects.
+      - ${PROJECTS_DIR:-./projects}:/var/www/html/projects
     ports:
       - "${MCP_ACCESS:-127.0.0.1:8933:8933}"
     extra_hosts:

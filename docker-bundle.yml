@@ -126,7 +126,8 @@ env:
   MISE_DATA_DIR: value:/var/www/html/tools
   MISE_CACHE_DIR: value:/var/www/html/tools/.cache
   MISE_GLOBAL_CONFIG_FILE: value:/var/www/html/tools/config.toml
-  MISE_TRUSTED_CONFIG_PATHS: value:/var/www/html/workspace
+  # Конфиги рабочей области пишет агент, проектов хоста (.tool-versions, mise.toml) — человек.
+  MISE_TRUSTED_CONFIG_PATHS: value:/var/www/html/workspace:/var/www/html/projects
   MISE_YES: value:1
   # Версия mise закреплена: проверка обновлений там, где mise.jdx.dev недоступен,
   # только тормозит каждый вызов на 5–25 с.
@@ -139,6 +140,15 @@ volumes:
   tools:     /var/www/html/tools
   state:     /var/www/html/state
   logs:      /var/www/html/logs
+
+# Папка проектов хоста на чтение и запись: агент запускает php -l, composer и тесты прямо в
+# проекте, а не поднимает ради этого свой контейнер. Путь задаёт PROJECTS_DIR в .env
+# (O:/Projects); по нему же стенд переводит пути хоста, которые знает агент, в свои.
+# Не задан — пустой ./projects, и стенд отвечает, что папка не подключена.
+binds:
+  projects:
+    path: /var/www/html/projects
+    host: ./projects
 
 services:
   traefik: {mode: off}

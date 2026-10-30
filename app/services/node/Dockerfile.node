@@ -50,7 +50,8 @@ RUN arch="$(dpkg --print-architecture)" \
 
 # Всё, что ставит mise, — в томе tools: и версии, и глобальный конфиг, и кэш. Пересоздание
 # контейнера не заставляет собирать php заново. Конфиги рабочей области доверенные: их
-# пишет сам агент через env_use. Версия mise закреплена, поэтому проверка обновлений
+# пишет сам агент через env_use, а проектов хоста (.tool-versions, mise.toml) — сам человек:
+# версия php в exec берётся из них. Версия mise закреплена, поэтому проверка обновлений
 # выключена: там, где mise.jdx.dev недоступен, она тормозит каждый вызов на 5–25 с.
 ENV TZ=UTC \
     LANG=C.UTF-8 \
@@ -58,7 +59,7 @@ ENV TZ=UTC \
     MISE_DATA_DIR=/var/www/html/tools \
     MISE_CACHE_DIR=/var/www/html/tools/.cache \
     MISE_GLOBAL_CONFIG_FILE=/var/www/html/tools/config.toml \
-    MISE_TRUSTED_CONFIG_PATHS=/var/www/html/workspace \
+    MISE_TRUSTED_CONFIG_PATHS=/var/www/html/workspace:/var/www/html/projects \
     MISE_YES=1 \
     MISE_DISABLE_UPDATE_WARNING=1 \
     PHP_EXTRA_CONFIGURE_OPTIONS=--with-sodium \
