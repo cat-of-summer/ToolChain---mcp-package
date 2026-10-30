@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { cfg } from './config.js';
-import { DIRS, TOOLS_BIN } from './paths.js';
+import { DIRS, PROJECTS, TOOLS_BIN } from './paths.js';
 
 // Рабочая область — единственное место обмена файлами. Загрузка с машины человека
 // (/upload), скачанное с сервера (files_get), дамп базы, вывод команды — всё ложится
@@ -31,11 +31,53 @@ function realOfExisting(file) {
   return path.join(fs.realpathSync(current), path.relative(current, file));
 }
 
+/** Подключена ли папка проектов хоста: смонтирована (PROJECTS_DIR) и не пуста. */
+export function projectsMounted() {
+  try {
+    return fs.readdirSync(PROJECTS).some((name) => name !== '.gitkeep');
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Путь в папке проектов хоста или null, если путь не о ней. Принимает «host:shop/src» и
+ * путь хоста, который знает агент: при PROJECTS_DIR=O:/Projects — «O:\Projects\shop\src».
+ */
+function projectPath(raw) {
+  let rel = null;
+  if (raw.startsWith('host:')) rel = raw.slice('host:'.length);
+  else if (cfg.projectsHost) {
+    const prefix = cfg.projectsHost.replace(/\\/g, '/').replace(/\/+$/, '');
+    // Буква диска Windows регистра не различает: o:/projects и O:/Projects — одно.
+    const same = /^[A-Za-z]:/.test(prefix) ? raw.toLowerCase() : raw;
+    const head = /^[A-Za-z]:/.test(prefix) ? prefix.toLowerCase() : prefix;
+    if (same === head || same.startsWith(`${head}/`)) rel = raw.slice(prefix.length);
+  }
+  if (rel === null) return null;
+
+  if (!projectsMounted()) {
+    throw new Error('папка проектов хоста не подключена: задайте PROJECTS_DIR в .env стенда и пересоздайте контейнер');
+  }
+  const base = fs.realpathSync(PROJECTS);
+  const file = path.resolve(base, `.${rel.startsWith('/') ? '' : '/'}${rel}`);
+  if (!inside(base, file) || !inside(base, realOfExisting(file))) {
+    throw new Error(`путь «${raw}» выходит за пределы папки проектов`);
+  }
+  return file;
+}
+
 /**
  * Путь агента → абсолютный путь в области. Принимает «a/b.txt», «/a/b.txt» (ведущий
- * слеш — от корня области, а не контейнера) и «ws:a/b.txt».
+ * слеш — от корня области, а не контейнера) и «ws:a/b.txt». С projects: true — и файлы
+ * проектов хоста (host:…, путь хоста под PROJECTS_DIR): так exec работает прямо в проекте.
+ * Ссылки /files/… и /upload остаются только для рабочей области.
  */
-export function resolve(value = '.') {
+export function resolve(value = '.', { projects = false } = {}) {
+  if (projects) {
+    const found = projectPath(String(value ?? '.').replace(/\\/g, '/'));
+    if (found) return found;
+  }
   const raw = String(value ?? '.').replace(/^ws:/, '').replace(/\\/g, '/');
   const base = fs.realpathSync(ensure());
   const file = path.resolve(base, `.${raw.startsWith('/') ? '' : '/'}${raw}`);
@@ -46,6 +88,8 @@ export function resolve(value = '.') {
   return file;
 }
 
+export const isProjectsRoot = (file) => fs.existsSync(PROJECTS) && file === fs.realpathSync(PROJECTS);
+
 export function ensure() {
   fs.mkdirSync(DIRS.workspace, { recursive: true });
   return DIRS.workspace;
@@ -53,6 +97,10 @@ export function ensure() {
 
 /** Абсолютный путь в области → то, что видит агент: относительный путь и ссылка. */
 export function describe(file) {
+  // Файл проекта хоста — его путь host:…; ссылки на скачивание у него нет: он и так на машине человека.
+  if (fs.existsSync(PROJECTS) && inside(fs.realpathSync(PROJECTS), file)) {
+    return { path: `host:${path.relative(fs.realpathSync(PROJECTS), file).split(path.sep).join('/')}` };
+  }
   const base = fs.realpathSync(ensure());
   const rel = path.relative(base, file).split(path.sep).join('/');
   return {

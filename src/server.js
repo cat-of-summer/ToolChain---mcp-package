@@ -6,11 +6,17 @@ import { wrap } from './tools/shared.js';
 import { TOPICS } from './tools/help.js';
 import * as query from './audit/query.js';
 import { checkForUpdate, updateNotice } from './update.js';
+import { summary as installedSummary } from './local/lifecycle.js';
+import { projectsMounted } from './workspace.js';
 
 // Инструкции клиент показывает модели при подключении. Здесь не список инструментов —
-// его модель и так видит, — а то, чего в списке не видно: как устроен обмен файлами,
-// откуда берутся реквизиты и что произойдёт при изменяющем вызове.
-function instructions(groups, notice) {
+// его модель и так видит, — а то, чего в списке не видно: что стенд заменяет docker run,
+// что в нём уже стоит, как устроен обмен файлами и что произойдёт при изменяющем вызове.
+// Клиенты обрезают длинные инструкции (около 2 КБ) — текст держится в этом потолке, а
+// уведомление об обновлении идёт первым, чтобы обрезка его не съела.
+export const INSTRUCTIONS_MAX = 2000;
+
+export function instructions(groups, { notice, installed, projects }) {
   const local = groups.some((g) => ['env', 'run', 'jobs', 'ws'].includes(g));
   const remote = groups.some((g) => ['ssh', 'files', 'docker', 'db'].includes(g));
 
@@ -18,70 +24,57 @@ function instructions(groups, notice) {
     'Стенд — рабочая среда агента и прослойка к удалённым серверам.',
     ...(local ? [
       '',
-      'Рабочая среда — контейнер стенда с рабочей областью (свой каталог, не папки машины человека).',
-      'Языки ставит mise: tools: ["python@3.11"] в exec/run_code или env_use для каталога; php и ruby',
-      'собираются минуты — такой вызов вернёт id задачи, дождитесь её job_status с wait.',
+      'Нужен php, python, node, утилита — exec и run_code здесь, а не docker run и не ручной разбор в bash: '
+        + 'версия через tools: ["php@8.1"]'
+        + (projects ? `, cwd — проект хоста (${projects}<проект>).` : ', файлы — в рабочей области.'),
+      ...(installed ? [`Уже стоят: ${installed}.`] : []),
+      'Новую php mise собирает минуты один раз. LibreOffice, pdf, ocr, ffmpeg — env_install kit:office|pdf|ocr|media. '
+        + 'Новое стенд спрашивает у человека: публично, разово или приватно.',
       `Файл с машины человека: curl -F file=@путь "${cfg.publicBaseUrl}/upload?dir=uploads"; обратно — ws_link.`,
-      '',
-      'Нет python, php или утилиты на машине человека — не повод переходить на bash и разбирать вручную:',
-      'тот же код запускается здесь (run_code с tool: "python@3.11"). Задачу, которую проще решить кодом,',
-      'решайте кодом; повторится — сохраните скрипт в tools/bin рабочей области (он в PATH, описание —',
-      'первой строкой) и вызывайте по имени. Перед новым скриптом проверьте свои в toolkit_info — help tools.',
+      'Повторится — скрипт в tools/bin (в PATH, описание первой строкой; свои — toolkit_info).',
     ] : []),
     ...(remote ? [
       '',
-      'Стенд доступов не хранит: реквизиты приходят в вызове. Откройте цель conn_open(name, target) —',
-      'дальше ssh_*, files_*, docker_*, db_* берут conn: "name". Пароль или ключ — значением, файлом',
-      'рабочей области (ws:путь) или ссылкой secret://<id>; из ответов и журнала они вычищаются.',
-      'Файлы ходят через рабочую область: files_get кладёт туда, files_put берёт оттуда.',
-      'Доступ спрашивается на user@host и по разу за сессию: первый вызов — чтение (человек может сразу',
-      'дать и запись), первый изменяющий — запись; дальше молча. Будете писать — conn_open(access: "write"),',
-      'один вопрос на всё. Отказ и таймаут — обычный исход: сообщите о нём и не обходите другим инструментом.',
-      'readonly: true в цели — только по просьбе человека: он спрашивает про каждый похожий на запись вызов, а для',
-      'работы на чтение хватает access: "read". SQL — через db_query (блок db, без проброса порта — via: "exec",',
-      'права только на localhost — db.socket), а не mysql -e в shell: SELECT там идёт без вопроса.',
+      'Доступов стенд не хранит: conn_open(name, target), дальше ssh_*, files_*, docker_*, db_* с conn: "name". '
+        + 'Пароль, ключ — значением, ws:путь или secret://<id>; из ответов и журнала вычищаются. '
+        + 'Файлы — через рабочую область: files_get туда, files_put оттуда.',
+      'Доступ спрашивается на user@host раз за сессию: чтение, первая запись — ещё раз (conn_open(access: "write") — '
+        + 'сразу). Отказ действует до конца сессии, таймаут — нет: сообщите человеку, не обходите другим инструментом.',
+      'readonly: true — только по просьбе человека. SQL — db_query (via: "exec", db.socket), а не mysql -e в shell.',
     ] : []),
     '',
-    `Подробности — help (разделы: ${Object.keys(TOPICS).join(', ')}), состояние — toolkit_info.`,
-    `Поднятые группы инструментов: ${groups.join(', ')}.`,
+    `Подробности — help (${Object.keys(TOPICS).join(', ')}), состояние — toolkit_info.`,
   ];
 
   const en = [
     'The toolkit is the agent\'s workspace and a layer over remote servers.',
     ...(local ? [
       '',
-      'The workspace is the toolkit container with its own directory (not the human\'s folders).',
-      'Languages come from mise: tools: ["python@3.11"] in exec/run_code or env_use for a directory; php and',
-      'ruby compile for minutes — such a call returns a job id, wait for it with job_status and wait.',
+      'Need php, python, node, a utility — exec and run_code here, not docker run and not manual parsing in bash: '
+        + 'the version via tools: ["php@8.1"]'
+        + (projects ? `, cwd — a host project (${projects}<project>).` : ', files — in the workspace.'),
+      ...(installed ? [`Already installed: ${installed}.`] : []),
+      'mise compiles a new php once, for minutes. LibreOffice, pdf, ocr, ffmpeg — env_install kit:office|pdf|ocr|media. '
+        + 'The toolkit asks the human about new installs: public, once or private.',
       `A file from the human's machine: curl -F file=@path "${cfg.publicBaseUrl}/upload?dir=uploads"; back — ws_link.`,
-      '',
-      'No python, php or a utility on the human\'s machine is no reason to fall back to bash and manual parsing:',
-      'the same code runs here (run_code with tool: "python@3.11"). Solve as code what is easier as code; if it',
-      'will repeat, save the script to the workspace\'s tools/bin (on PATH, purpose in the first line) and call it',
-      'by name. Before writing a new one check your own in toolkit_info — help tools.',
+      'If it repeats — a script in tools/bin (on PATH, purpose in the first line; yours — toolkit_info).',
     ] : []),
     ...(remote ? [
       '',
-      'The toolkit stores no credentials: they come with the call. Open a target with conn_open(name, target);',
-      'then ssh_*, files_*, docker_*, db_* take conn: "name". A password or key goes as a value, a workspace',
-      'file (ws:path) or a secret://<id> reference; it is scrubbed from replies and the journal.',
-      'Files travel through the workspace: files_get puts them there, files_put takes them from there.',
-      'Access is asked per user@host, once per session and level: the first call asks for reading (the human',
-      'may grant writing right away), the first mutating one — for writing; then silence. Going to write —',
-      'conn_open(access: "write"), one question for all. A refusal or a timeout is a normal outcome: report it',
-      'and do not route around it with another tool.',
-      'readonly: true on a target only when the human asks for it: it asks about every write-like call, and',
-      'access: "read" is enough for read-only work. SQL goes through db_query (the db block; no forwarded port —',
-      'via: "exec", grants on localhost only — db.socket), not mysql -e in a shell: a SELECT there runs without a question.',
+      'The toolkit stores no credentials: conn_open(name, target), then ssh_*, files_*, docker_*, db_* with conn: "name". '
+        + 'A password or key — a value, ws:path or secret://<id>; scrubbed from replies and the journal. '
+        + 'Files go through the workspace: files_get there, files_put from there.',
+      'Access is asked per user@host once a session: reading, the first write once more (conn_open(access: "write") — '
+        + 'at once). A refusal lasts the session, a timeout does not: tell the human, do not route around it.',
+      'readonly: true — only when the human asks. SQL — db_query (via: "exec", db.socket), not mysql -e in a shell.',
     ] : []),
     '',
-    `Details — help (topics: ${Object.keys(TOPICS).join(', ')}), state — toolkit_info.`,
-    `Active tool groups: ${groups.join(', ')}.`,
+    `Details — help (${Object.keys(TOPICS).join(', ')}), state — toolkit_info.`,
   ];
 
   const text = pick({ ru: ru.join('\n'), en: en.join('\n') });
-  // Уведомление об обновлении — частью инструкций: агент должен увидеть его, не вызывая ничего.
-  return notice ? `${text}\n\n${notice}` : text;
+  // Уведомление об обновлении — первым: агент должен увидеть его, не вызывая ничего, и обрезка не должна его съесть.
+  return notice ? `${notice}\n\n${text}` : text;
 }
 
 /*
@@ -91,16 +84,24 @@ function instructions(groups, notice) {
 let updatePromise = null;
 export const update = () => (updatePromise ??= checkForUpdate().catch(() => null));
 
-export async function createServer({ spec = 'all' } = {}) {
+export async function createServer({ spec = 'all', agent = null } = {}) {
   const { groups, tools } = select(spec);
   const updateState = await update();
 
   const server = new McpServer(
     { name: 'toolkit', version: cfg.version },
-    { instructions: instructions(groups, updateNotice(updateState)) },
+    {
+      instructions: instructions(groups, {
+        notice: updateNotice(updateState),
+        installed: groups.includes('run') ? await installedSummary(agent) : '',
+        // Как назвать проект в cwd: путём хоста, если префикс известен, иначе host:.
+        projects: !projectsMounted() ? null
+          : cfg.projectsHost ? `${cfg.projectsHost.replace(/\\/g, '/').replace(/\/+$/, '')}/` : 'host:',
+      }),
+    },
   );
 
-  const ctx = { server, groups, toolCount: tools.length, update: updateState };
+  const ctx = { server, groups, toolCount: tools.length, update: updateState, agent };
 
   for (const def of tools) {
     server.registerTool(

@@ -1,3 +1,4 @@
+import { ErrorCode } from '@modelcontextprotocol/sdk/types.js';
 import { cfg } from '../config.js';
 import * as queue from './queue.js';
 import * as grants from './grants.js';
@@ -15,6 +16,9 @@ import { redact } from '../secrets.js';
 //   - цель с readonly: true — каждый похожий на запись вызов, при любой настройке;
 //   - замена закреплённого ключа хоста — каждый раз.
 // Работа в рабочей области стенда не спрашивается: это песочница самого стенда.
+//
+// Запоминается только ответ человека. Таймаут и отмена вызова клиентом — не отказ: человек
+// мог отойти, и повторный вызов обязан спросить снова, а не отклоняться до конца сессии.
 
 const LEVEL_TITLES = { read: 'Только чтение', write: 'Чтение и запись' };
 
@@ -29,7 +33,10 @@ export class Declined extends Error {
 
 function reason(decision) {
   if (decision.status === 'timeout') {
-    return `подтверждение не получено за ${Math.round(cfg.approveTimeoutMs / 1000)} с`;
+    return `человек не ответил за ${Math.round(cfg.approveTimeoutMs / 1000)} с. Это не отказ: повторный вызов спросит снова`;
+  }
+  if (decision.status === 'cancelled') {
+    return 'клиент отменил вызов, пока ждал ответа человека. Это не отказ: повторный вызов спросит снова';
   }
   if (decision.scope === 'access') {
     if (decision.readOnly) return `человек разрешил на «${decision.key}» только чтение`;
@@ -42,8 +49,8 @@ function reason(decision) {
   return 'человек отказал';
 }
 
-/** Схема вопроса: да/нет или выбор уровня доступа. */
-function schemaOf(choices) {
+/** Схема вопроса: да/нет или выбор одного из вариантов (по умолчанию — уровни доступа). */
+function schemaOf(choices, titles = LEVEL_TITLES, declineTitle = 'Отказать') {
   if (!choices) {
     return {
       approve: {
@@ -56,10 +63,10 @@ function schemaOf(choices) {
   return {
     access: {
       type: 'string',
-      title: 'Доступ',
+      title: titles === LEVEL_TITLES ? 'Доступ' : 'Выбор',
       oneOf: [
-        ...choices.map((level) => ({ const: level, title: LEVEL_TITLES[level] })),
-        { const: 'deny', title: 'Отказать' },
+        ...choices.map((level) => ({ const: level, title: titles[level] ?? level })),
+        { const: 'deny', title: declineTitle },
       ],
       default: choices[0],
     },
@@ -73,7 +80,7 @@ function readAnswer(content, choices) {
   return choices.includes(level) ? { status: 'approved', level } : { status: 'declined' };
 }
 
-async function viaElicitation(ctx, { summary, details, choices }) {
+async function viaElicitation(ctx, { summary, details, choices, titles, declineTitle }, deadline) {
   const caps = ctx?.server?.server?.getClientCapabilities?.();
   if (!caps?.elicitation) return null;
 
@@ -84,12 +91,13 @@ async function viaElicitation(ctx, { summary, details, choices }) {
   }
 
   try {
-    const properties = schemaOf(choices);
+    const properties = schemaOf(choices, titles, declineTitle);
     const res = await ctx.server.server.elicitInput({
       message: lines.join('\n'),
       requestedSchema: { type: 'object', properties, required: Object.keys(properties) },
     }, {
-      timeout: cfg.approveTimeoutMs,
+      timeout: Math.max(1, deadline - Date.now()),
+      signal: ctx.signal,
       // Без привязки к запросу SDK шлёт вопрос в фоновый поток сессии, а если клиент
       // его ещё не открыл — молча выбрасывает, и вызов висит до таймаута.
       relatedRequestId: ctx.requestId,
@@ -98,7 +106,11 @@ async function viaElicitation(ctx, { summary, details, choices }) {
     if (res.action === 'accept') return { ...readAnswer(res.content, choices), via: 'elicitation' };
     if (res.action === 'decline') return { status: 'declined', via: 'elicitation' };
     return null; // cancel — уходим в очередь, вдруг человек ответит там
-  } catch {
+  } catch (err) {
+    if (ctx.signal?.aborted) return { status: 'cancelled', via: 'client' };
+    // Время вопроса вышло в клиенте — то же, что ждала бы очередь: второй круг ожидания
+    // там только удвоил бы паузу перед тем же исходом.
+    if (err?.code === ErrorCode.RequestTimeout) return { status: 'timeout', via: 'timeout' };
     return null; // клиент соврал о возможности или отвалился — остаётся очередь
   }
 }
@@ -113,23 +125,28 @@ function safe(value, depth = 0) {
 
 /**
  * Задаёт человеку один вопрос: сначала клиенту, при неудаче — в веб-очередь.
- * choices — уровни доступа на выбор (первый — тот, о котором спросили); без них вопрос да/нет.
- * Одобренное решение с choices несёт level.
+ * choices — варианты на выбор (первый — тот, о котором спросили); без них вопрос да/нет.
+ * titles — их подписи, по умолчанию уровни доступа. Одобренное решение с choices несёт level.
+ * Ожидание одно: клиент и очередь делят TK_APPROVE_TIMEOUT, ctx.signal обрывает его.
  */
-export async function ask(ctx, { tool, target, summary, details, choices }) {
+export async function ask(ctx, { tool, target, summary, details, choices, titles, declineTitle }) {
   const cleanSummary = redact(summary);
   const cleanDetails = safe(details);
-  const item = { tool, target, summary: cleanSummary, details: cleanDetails, choices };
+  const item = { tool, target, summary: cleanSummary, details: cleanDetails, choices, titles, declineTitle };
+  const deadline = Date.now() + cfg.approveTimeoutMs;
 
-  const answered = await viaElicitation(ctx, item);
+  if (ctx?.signal?.aborted) return { status: 'cancelled', via: 'client' };
+
+  const answered = await viaElicitation(ctx, item, deadline);
   if (answered) {
     const id = queue.create(item);
-    queue.decide(id, answered.level ?? answered.status, 'elicitation');
+    if (['timeout', 'cancelled'].includes(answered.status)) queue.expire(id, answered.status, answered.via);
+    else queue.decide(id, answered.level ?? answered.status, 'elicitation');
     return { ...answered, id };
   }
 
   const id = queue.create(item);
-  const outcome = await queue.wait(id, cfg.approveTimeoutMs);
+  const outcome = await queue.wait(id, Math.max(0, deadline - Date.now()), ctx?.signal);
   return { ...fromQueue(outcome, choices), id, url: `${cfg.publicBaseUrl}/approvals` };
 }
 
@@ -190,7 +207,7 @@ async function perAccess(ctx, call) {
   });
 
   if (decision.status !== 'approved') {
-    grants.deny(ctx.sessionId, call.key, need);
+    if (decision.status === 'declined') grants.deny(ctx.sessionId, call.key, need);
     throw new Declined({ ...base, ...decision }, call.summary);
   }
 

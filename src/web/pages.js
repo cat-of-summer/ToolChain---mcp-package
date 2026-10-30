@@ -90,14 +90,19 @@ function card(item) {
 
 const LEVELS = { read: 'Только чтение', write: 'Чтение и запись' };
 
-// Вопрос о доступе к серверу — выбор уровня; остальные — да или нет.
+// Вопрос о доступе к серверу — выбор уровня, об установке инструмента — выбор видимости;
+// остальные — да или нет.
 function buttons(item) {
+  const titles = item.titles || LEVELS;
   const yes = item.choices
-    ? item.choices.map((level) => '<button class="yes" data-id="' + item.id + '" data-decision="' + level + '">'
-        + LEVELS[level] + '</button>').join('')
+    ? item.choices.map((choice) => '<button class="yes" data-id="' + item.id + '" data-decision="' + choice + '">'
+        + escapeHtml(titles[choice] || choice) + '</button>').join('')
     : '<button class="yes" data-id="' + item.id + '" data-decision="approved">Разрешить</button>';
-  return yes + '<button class="no" data-id="' + item.id + '" data-decision="declined">Отказать</button>';
+  return yes + '<button class="no" data-id="' + item.id + '" data-decision="declined">'
+    + escapeHtml(item.declineTitle || 'Отказать') + '</button>';
 }
+
+const granted = (item) => item.status === 'approved' || (item.choices || []).includes(item.status);
 
 function escapeHtml(s) {
   return String(s).replace(/[&<>]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
@@ -115,7 +120,7 @@ async function refresh() {
     .filter((item) => item.status !== 'pending')
     .map((item) => '<tr><td>' + when(item.ts) + '</td><td>' + item.tool + '</td>'
       + '<td>' + escapeHtml(item.target || '') + '</td>'
-      + '<td class="' + (['approved', 'read', 'write'].includes(item.status) ? 'ok' : 'bad') + '">' + item.status + '</td>'
+      + '<td class="' + (granted(item) ? 'ok' : 'bad') + '">' + item.status + '</td>'
       + '<td>' + (item.decidedVia || '') + '</td></tr>').join('')
     + '</tbody></table>';
 }

@@ -10,7 +10,9 @@ import { poolState } from '../transport/ssh.js';
 import * as targets from '../target.js';
 import * as jobs from '../local/jobs.js';
 import * as mise from '../local/mise.js';
-import { ownTools } from '../workspace.js';
+import { ownTools, projectsMounted } from '../workspace.js';
+import { agentOf } from '../agent.js';
+import { summary as installedSummary, span } from '../local/lifecycle.js';
 import { versionsHost } from '../local/reach.js';
 import { upgradeSteps } from '../update.js';
 
@@ -23,8 +25,9 @@ const RU = {
   index: `Стенд — рабочая среда агента и прослойка к удалённым серверам.
 
 Локально (в контейнере стенда, в рабочей области):
-  env_*   — языки и инструменты через mise: python@3.11, php@7.4, node@latest…
-  exec, run_code — команды и код; долгое уходит в фон задачей (job_*)
+  env_*   — языки и инструменты через mise: python@3.11, php@7.4, node@latest…;
+            пакеты Debian: kit:office (LibreOffice), kit:pdf, kit:ocr, kit:media, apt:<пакет>
+  exec, run_code — команды и код, в рабочей области или в проекте хоста; долгое уходит в фон (job_*)
   tools/bin — скрипты, которые агент пишет себе сам: вызываются по имени, переживают сессию
   ws_*    — файлы рабочей области; с машины человека — /upload, обратно — ссылка /files/…
 
@@ -55,8 +58,12 @@ tools — недостающая версия ставится сама, pip/npm
 возможности — доработайте существующий, а не заводите копию рядом. Рабочая область лежит в томе:
 написанное сегодня пригодится в следующей сессии.`,
 
-  workspace: `Рабочая область — каталог в томе стенда. Реальные папки машины человека сюда не монтируются.
-Пути всегда относительные к её корню; «..» и симлинки наружу отклоняются.
+  workspace: `Рабочая область — каталог в томе стенда. Пути относительные к её корню; «..» и симлинки наружу отклоняются.
+
+Папка проектов хоста (PROJECTS_DIR в .env стенда) смонтирована на чтение и запись: exec, run_code, env_use,
+ws_* и files_get/files_put принимают её путь как есть — «${cfg.projectsHost || 'O:/Projects'}/shop/src» — или host:shop/src.
+Код запускается прямо в проекте: php -l, composer install, тесты — без копирования и без docker run.
+Не подключена — такие пути отвечают ошибкой, а файлы приходят через /upload.
 
 Как файлы попадают внутрь:
   - с машины человека: curl -F file=@путь "${cfg.publicBaseUrl}/upload?dir=uploads" → ответ с путём;
@@ -69,7 +76,20 @@ tools — недостающая версия ставится сама, pip/npm
 
   env: `Тулчейны ставит mise. python, node, go, java приходят готовыми сборками за секунды; php и ruby
 собираются из исходников — минуты: env_install возвращает id задачи, дождитесь её job_status с wait.
-Поставленное лежит в томе и переживает перезапуск — собирается один раз.
+Поставленное лежит в томе и переживает перезапуск — собирается один раз. Что уже есть — env_list.
+
+Чего нет в mise — пакеты Debian: env_install(["kit:office"]) — LibreOffice без GUI
+(soffice --headless --convert-to pdf file.docx), kit:pdf — poppler, qpdf, ghostscript, kit:ocr — tesseract
+rus+eng, kit:media — ffmpeg, ImageMagick, exiftool; любой пакет — apt:<имя>. Списки и .deb лежат в томе:
+после пересоздания контейнера стенд ставит наборы заново сам, без сети, если её нет.
+Из mise ставятся и так: composer, pandoc, sqlite, ripgrep, yq, shellcheck, gh — env_available(tool).
+
+Видимость и срок. Новую установку стенд спрашивает у человека: публично (всем агентам), разово (всем,
+удаляется через ${span(cfg.toolTtl.once)} без использования) или приватно (только этому агенту — нужен заголовок
+X-Toolkit-Agent или MCP roots у клиента). Без ответа — разово. visibility в вызове снимает вопрос: передавайте
+её, только когда человек уже сказал. Каждое использование продлевает срок, неиспользуемое уборщик снимает сам;
+закреплённое env_use с global — не трогает. Приватность — видимость в списках и защита от удаления чужим
+агентом, не изоляция: код всех агентов выполняется в одном контейнере.
 
 Три способа выбрать версию:
   - tools в exec/run_code — на один вызов, недостающее ставится само;
@@ -78,8 +98,9 @@ tools — недостающая версия ставится сама, pip/npm
 Список версий — env_available(tool, prefix). Что угодно из реестра mise (mise registry):
 terraform, kubectl, rust, dotnet и т.д. Чего нет на машине человека — ставится здесь (раздел tools).`,
 
-  run: `exec — bash в контейнере стенда, cwd — рабочая область. Контейнер — песочница стенда: apt-get,
-pip, composer и npm ставят что нужно, подтверждений нет.
+  run: `exec — bash в контейнере стенда, cwd — рабочая область или проект хоста (раздел workspace). Контейнер —
+песочница стенда: pip, composer и npm ставят что нужно, подтверждений нет. Системные программы — не apt-get
+в exec (пропадут при пересоздании контейнера), а env_install kit:… или apt:… (раздел env).
 run_code — код строкой: сохраняется в файл и выполняется нужной версией.
 Скрипты из tools/bin вызываются по имени: каталог в PATH (раздел tools).
 
@@ -118,13 +139,15 @@ db.via: tunnel — драйвер через SSH-туннель (порт баз
   - первый изменяющий вызов при выданном чтении спрашивает запись ещё раз — и всё, дальше молча;
   - знаете заранее, что будете писать, — conn_open(access: "write"): один вопрос на всё.
 Разрешение покрывает все протоколы этого пользователя (shell, файлы, docker, база через туннель);
-другой пользователь на том же сервере спрашивается отдельно. Отказ запоминается: на чтение — закрывает
-доступ, на запись — только запись. TK_APPROVAL=write спрашивает только запись, off — ничего.
+другой пользователь на том же сервере спрашивается отдельно. Отказ человека запоминается до конца
+сессии: на чтение — закрывает доступ, на запись — только запись. Таймаут и брошенный клиентом вызов
+не запоминаются: повторный вызов спросит снова. TK_APPROVAL=write спрашивает только запись, off — ничего.
 Цель с readonly: true спрашивает про каждый похожий на запись вызов — и после выданного разрешения.
 Ставится только по просьбе человека: для работы на чтение хватает access: "read", запись спросится и так.
 SQL — через db_query, а не mysql -e в ssh_exec: SELECT идёт без вопроса, без разбора шелл-команды.
 Спрашивает клиент (elicitation); если не умеет — заявка ждёт на ${cfg.publicBaseUrl}/approvals
-до ${Math.round(cfg.approveTimeoutMs / 1000)} с. Отказ и таймаут — обычный исход: сообщите о нём, не обходите другим инструментом.`,
+до ${Math.round(cfg.approveTimeoutMs / 1000)} с — общее время с вопросом в клиенте. Отказ и таймаут — обычный исход:
+сообщите о нём человеку и не обходите другим инструментом; после таймаута можно повторить, когда он рядом.`,
 
   audit: `Каждый вызов целиком — аргументы, команда, код возврата, решение по подтверждению, stdout и stderr —
 ложится в журнал (JSONL в томе logs). Секреты вырезаются: по имени поля, по содержимому (ключи PEM,
@@ -137,8 +160,9 @@ const EN = {
   index: `The toolkit is the agent's workspace and a layer over remote servers.
 
 Local (in the toolkit container, inside the workspace):
-  env_*   — languages and tools via mise: python@3.11, php@7.4, node@latest…
-  exec, run_code — commands and code; long runs become background jobs (job_*)
+  env_*   — languages and tools via mise: python@3.11, php@7.4, node@latest…;
+            Debian packages: kit:office (LibreOffice), kit:pdf, kit:ocr, kit:media, apt:<package>
+  exec, run_code — commands and code, in the workspace or a host project; long runs go to the background (job_*)
   tools/bin — scripts the agent writes for itself: called by name, they outlive the session
   ws_*    — workspace files; from the human's machine — /upload, back — a /files/… link
 
@@ -205,6 +229,7 @@ export const tools = [
     input: {},
     run: async (_args, { ctx }) => {
       const caps = ctx?.server?.server?.getClientCapabilities?.();
+      const agent = await agentOf(ctx);
       return {
         data: {
           версия: cfg.version,
@@ -217,7 +242,14 @@ export const tools = [
             mise: await mise.version(),
             задачВРаботе: jobs.running(),
             хостВерсий: { true: 'mise-versions.jdx.dev доступен', false: 'недоступен — версии из первоисточников, python собирается из исходников', null: 'ещё не проверен' }[versionsHost()],
+            поставлено: (await installedSummary(agent.id)) || 'ничего — подробности и сроки в env_list',
+            папкаПроектов: !projectsMounted() ? 'не подключена: PROJECTS_DIR в .env стенда'
+              : cfg.projectsHost ? `${cfg.projectsHost} — пути хоста под ней и host:<проект> работают в exec, run_code, ws_*, files_*`
+                : 'подключена, путь хоста не абсолютный — проекты как host:<проект>',
           },
+          агент: agent.id
+            ? { имя: agent.id, источник: { header: 'заголовок X-Toolkit-Agent', env: 'TK_AGENT', roots: 'MCP roots — корень проекта' }[agent.source] }
+            : 'безымянный: приватные установки недоступны — заголовок X-Toolkit-Agent в настройках MCP-клиента',
           своиИнструменты: ownTools(),
           подключения: targets.list(ctx?.sessionId),
           подтверждения: {

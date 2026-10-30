@@ -125,8 +125,87 @@ test('readonly спрашивает каждый раз, и после разр�
   await assert.rejects(gate.authorize(ctx('i'), write({ guard: { reasons: ['rm'] } })), { name: 'Declined' });
 });
 
-test('без ответа — отказ по таймауту', async () => {
-  await assert.rejects(gate.authorize(ctx('j'), read()), /не получено/);
+test('без ответа — отказ по таймауту, но не запоминается: следующий вызов спрашивает снова', async () => {
+  await assert.rejects(gate.authorize(ctx('j'), read()), (err) => {
+    assert.match(err.message, /не ответил .* повторный вызов спросит снова/);
+    assert.equal(err.decision.status, 'timeout');
+    return true;
+  });
+  assert.deepEqual(grants.get('j', 'deploy@h1'), { read: undefined, write: undefined });
+
+  answer('approved');
+  const again = await gate.authorize(ctx('j'), read());
+  assert.equal(again.questions, 1, 'спросили заново, а не отклонили');
+});
+
+test('таймаут вопроса о записи оставляет выданное чтение и не закрывает запись', async () => {
+  answer('approved');
+  await gate.authorize(ctx('j2'), read());
+  await assert.rejects(gate.authorize(ctx('j2'), write()), /не ответил/);
+  assert.deepEqual(grants.get('j2', 'deploy@h1'), { read: true, write: undefined });
+});
+
+test('клиент бросил вызов — заявка закрыта cancelled, отказ не запомнен', async () => {
+  const controller = new AbortController();
+  const seen = {};
+  const onChange = ({ id, action }) => {
+    if (action !== 'created') return;
+    queue.events.off('change', onChange);
+    seen.id = id;
+    setImmediate(() => controller.abort());
+  };
+  queue.events.on('change', onChange);
+
+  const started = Date.now();
+  await assert.rejects(gate.authorize({ ...ctx('n'), signal: controller.signal }, read()), /отменил вызов/);
+  assert.ok(Date.now() - started < 1000, 'не ждали таймаута');
+  assert.equal(queue.get(seen.id).status, 'cancelled');
+  assert.deepEqual(grants.get('n', 'deploy@h1'), { read: undefined, write: undefined });
+});
+
+test('таймаут в клиенте (elicitation) не ждёт второй круг в очереди', async () => {
+  const { McpError, ErrorCode } = await import('@modelcontextprotocol/sdk/types.js');
+  const asking = {
+    sessionId: 'o',
+    server: {
+      server: {
+        getClientCapabilities: () => ({ elicitation: {} }),
+        elicitInput: async (_params, options) => {
+          assert.ok(options.timeout <= cfg.approveTimeoutMs && options.timeout > 0);
+          throw new McpError(ErrorCode.RequestTimeout, 'Request timed out');
+        },
+      },
+    },
+  };
+  const started = Date.now();
+  await assert.rejects(gate.authorize(asking, read()), /не ответил/);
+  assert.ok(Date.now() - started < 1000, 'очередь не ждала ещё TK_APPROVE_TIMEOUT');
+  assert.equal(queue.pending().length, 0);
+  assert.deepEqual(grants.get('o', 'deploy@h1'), { read: undefined, write: undefined });
+});
+
+test('явное «нет» в клиенте запоминается', async () => {
+  const asking = {
+    sessionId: 'p',
+    server: { server: { getClientCapabilities: () => ({ elicitation: {} }), elicitInput: async () => ({ action: 'decline' }) } },
+  };
+  await assert.rejects(gate.authorize(asking, read()), { name: 'Declined' });
+  await assert.rejects(gate.authorize(asking, read()), /запрещён ранее/);
+});
+
+test('свои варианты: подписи уходят в заявку, выбор возвращается level', async () => {
+  const seen = answer('once');
+  const res = await gate.ask(ctx('q'), {
+    tool: 'env_install',
+    summary: 'Поставить php@8.1',
+    choices: ['public', 'once'],
+    titles: { public: 'Публично', once: 'Разово' },
+    declineTitle: 'Не ставить',
+  });
+  assert.equal(res.status, 'approved');
+  assert.equal(res.level, 'once');
+  assert.deepEqual(seen.item.titles, { public: 'Публично', once: 'Разово' });
+  assert.equal(seen.item.declineTitle, 'Не ставить');
 });
 
 test('TK_APPROVAL=write спрашивает только запись', async () => {

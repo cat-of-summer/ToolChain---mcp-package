@@ -10,6 +10,7 @@ import { createServer } from './server.js';
 import * as queue from './approve/queue.js';
 import * as grants from './approve/grants.js';
 import * as targets from './target.js';
+import * as agents from './agent.js';
 import * as auditQuery from './audit/query.js';
 import * as ws from './workspace.js';
 import { approvalsPage, auditPage } from './web/pages.js';
@@ -63,7 +64,8 @@ async function handleMcp(req, res, spec) {
 
   let built;
   try {
-    built = await createServer({ spec });
+    // Имя агента — из настроек клиента: оно переживает сессию, в отличие от mcp-session-id.
+    built = await createServer({ spec, agent: agents.clean(req.headers['x-toolkit-agent']) });
   } catch (err) {
     return send(res, 404, { error: err.message });
   }
@@ -80,6 +82,7 @@ async function handleMcp(req, res, spec) {
     // разрешения лежали бы в памяти до перезапуска процесса.
     grants.forget(transport.sessionId);
     targets.forget(transport.sessionId);
+    agents.forget(transport.sessionId);
   };
 
   await built.server.connect(transport);

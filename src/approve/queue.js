@@ -21,13 +21,14 @@ function trim() {
   }
 }
 
-// choices — уровни доступа на выбор (read, write): тогда решение — уровень, а approved
-// значит первый из них, тот, о котором спросили.
-export function create({ tool, target, summary, details, choices }) {
+// choices — варианты на выбор (уровни доступа read, write или свои с подписями titles):
+// тогда решение — вариант, а approved значит первый из них, тот, о котором спросили.
+export function create({ tool, target, summary, details, choices, titles, declineTitle }) {
   const id = newId();
   items.set(id, {
     id, ts: now(), tool, target: target ?? null, summary, details: details ?? null,
-    choices: choices ?? null, status: 'pending', decidedAt: null, decidedVia: null,
+    choices: choices ?? null, titles: titles ?? null, declineTitle: declineTitle ?? null,
+    status: 'pending', decidedAt: null, decidedVia: null,
   });
   trim();
   events.emit('change', { id, action: 'created' });
@@ -41,20 +42,29 @@ function close(id, status, via) {
   return item;
 }
 
-export function wait(id, timeoutMs) {
+/** Закрывает заявку без ответа человека: timeout или cancelled (клиент бросил вызов). */
+export function expire(id, status, via = status) {
+  close(id, status, via);
+  const resume = waiting.get(id);
+  if (resume) resume({ status, via });
+  events.emit('change', { id, action: status });
+}
+
+/** Ждёт решения до timeoutMs; signal — вызов, ради которого спрашивали, брошен клиентом. */
+export function wait(id, timeoutMs, signal) {
   return new Promise((resolve) => {
-    const timer = setTimeout(() => {
-      waiting.delete(id);
-      close(id, 'timeout', 'timeout');
-      events.emit('change', { id, action: 'timeout' });
-      resolve({ status: 'timeout', via: 'timeout' });
-    }, timeoutMs);
+    const onAbort = () => expire(id, 'cancelled', 'client');
+    const timer = setTimeout(() => expire(id, 'timeout'), timeoutMs);
 
     waiting.set(id, (outcome) => {
       clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
       waiting.delete(id);
       resolve(outcome);
     });
+
+    if (signal?.aborted) onAbort();
+    else signal?.addEventListener('abort', onAbort, { once: true });
   });
 }
 

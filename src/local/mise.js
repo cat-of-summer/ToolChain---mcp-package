@@ -38,7 +38,7 @@ async function mise(args, { cwd, timeoutMs = 60_000 } = {}) {
   return stdout;
 }
 
-/** Поставленные версии: { python: [{version, active, source}], … }. */
+/** Поставленные версии: { python: [{version, active, source, path}], … }. */
 export async function installed() {
   const raw = JSON.parse(await mise(['ls', '--installed', '--json']));
   return Object.fromEntries(Object.entries(raw).map(([tool, versions]) => [
@@ -47,6 +47,7 @@ export async function installed() {
       version: v.version,
       active: Boolean(v.active),
       ...(v.source?.path ? { source: v.source.path } : {}),
+      ...(v.install_path ? { path: v.install_path } : {}),
     })),
   ]));
 }
@@ -65,6 +66,21 @@ export async function current(cwd) {
   return Object.fromEntries(Object.entries(raw).map(([tool, versions]) => [
     tool, versions.map((v) => ({ version: v.version, installed: Boolean(v.installed), source: v.source?.path ?? null })),
   ]));
+}
+
+/** Где стоит версия под спецификацией (php@8.3 → …/installs/php/8.3.35); не стоит — null. */
+export async function where(spec) {
+  try {
+    return (await mise(['where', ...checkSpecs([spec])], { timeoutMs: 30_000 })).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+/** Пути установок из `mise ls --json` с фильтром: --global (закреплённое) или --current в cwd. */
+export async function installPaths(flag, cwd) {
+  const raw = JSON.parse(await mise(['ls', flag, '--json'], { cwd }));
+  return Object.values(raw).flat().filter((v) => v.installed !== false && v.install_path).map((v) => v.install_path);
 }
 
 export async function version() {

@@ -57,7 +57,13 @@ export function wrap(def, sessionCtx) {
   return async (args = {}, extra = {}) => {
     // Вопрос человеку привязывается к этому вызову: без requestId SDK шлёт его в фоновый
     // поток сессии, а если клиент его ещё не открыл — молча выбрасывает, и вызов висит.
-    const ctx = { ...sessionCtx, requestId: extra.requestId, sessionId: extra.sessionId ?? sessionCtx.sessionId };
+    // signal — клиент бросил вызов: вопрос человеку перестаёт ждать и не считается отказом.
+    const ctx = {
+      ...sessionCtx,
+      requestId: extra.requestId,
+      sessionId: extra.sessionId ?? sessionCtx.sessionId,
+      signal: extra.signal,
+    };
     const entry = audit.start({
       tool: def.name,
       alias: targets.safeConn(args.conn),
@@ -153,6 +159,8 @@ export function wrap(def, sessionCtx) {
       // `echo $MYSQL_PWD` иначе вернули бы пароль, переданный ссылкой.
       return text(scrubDeep(payload, secrets));
     } catch (err) {
+      // По журналу должно быть видно, отказал человек, не ответил или вызов брошен клиентом.
+      if (err.name === 'Declined') entry.approval = err.decision;
       audit.finish(entry, { ok: false, error: err.message, stdout: '', stderr: err.stack || '', secrets });
 
       if (err.name === 'Declined') {

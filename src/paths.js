@@ -16,7 +16,13 @@ export const DIRS = {
   jobs: path.join(ROOT, 'state', 'jobs'),
   logs: path.join(ROOT, 'logs'),
   blobs: path.join(ROOT, 'logs', 'blobs'),
+  // Тулчейны mise и системные пакеты — том tools; реестр видимости и сроков лежит в нём же,
+  // рядом с тем, что описывает: том пересоздан — пропал и реестр, а не повис без установок.
+  tools: process.env.MISE_DATA_DIR || path.join(ROOT, 'tools'),
 };
+
+// Папка проектов хоста (PROJECTS_DIR): смонтирована сюда, когда задана. Не в томе — bind.
+export const PROJECTS = process.env.TK_PROJECTS_ROOT || path.join(ROOT, 'projects');
 
 export const KNOWN_HOSTS = path.join(DIRS.state, 'known_hosts.json');
 

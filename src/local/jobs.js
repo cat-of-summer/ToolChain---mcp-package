@@ -168,6 +168,13 @@ export function wait(id, ms) {
   });
 }
 
+/** Ждёт завершения задачи сколько угодно: учёт после сборки php, восстановления пакетов. */
+export function done(id) {
+  const job = jobs.get(id);
+  if (!job || job.status !== 'running') return Promise.resolve();
+  return new Promise((resolve) => job.waiters.push(resolve));
+}
+
 export function kill(id) {
   const job = jobs.get(id);
   if (!job) throw new Error(`задачи «${id}» нет`);

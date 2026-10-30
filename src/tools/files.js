@@ -137,7 +137,7 @@ export const tools = [
     },
     run: async (args, { resolved, approveHostKey, signal }) => {
       const remote = resolvePath(resolved, args.path);
-      const local = ws.resolve(args.to || `downloads/${ws.safeName(path.posix.basename(remote))}`);
+      const local = ws.resolve(args.to || `downloads/${ws.safeName(path.posix.basename(remote))}`, { projects: true });
       const stats = { files: 0, bytes: 0 };
 
       await withFiles(resolved, { approveHostKey }, async (api, { pool }) => {
@@ -186,7 +186,7 @@ export const tools = [
           stats.bytes = Buffer.byteLength(args.content);
           return;
         }
-        const local = ws.resolve(args.from);
+        const local = ws.resolve(args.from, { projects: true });
         if (!fs.existsSync(local)) throw new Error(`в рабочей области нет «${args.from}»`);
         if (fs.statSync(local).isDirectory()) return putTree(api, pool, local, dest, stats, signal);
         await api.putFile(local, dest);

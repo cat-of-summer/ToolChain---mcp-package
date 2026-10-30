@@ -4,12 +4,62 @@ import { z } from 'zod';
 import { pick } from '../i18n.js';
 import { cfg } from '../config.js';
 import * as mise from '../local/mise.js';
+import * as apt from '../local/apt.js';
 import * as jobs from '../local/jobs.js';
+import * as registry from '../local/registry.js';
+import * as lifecycle from '../local/lifecycle.js';
 import * as ws from '../workspace.js';
 
 // Код агента выполняется в контейнере стенда, в рабочей области: относительные пути в
-// коде — это файлы области, туда же ложится то, что скачано с серверов. Версии языков
-// берёт mise: tools в вызове, mise.toml каталога (env_use) или глобальные.
+// коде — это файлы области, туда же ложится то, что скачано с серверов. cwd может быть и
+// проектом хоста (host:…, путь под PROJECTS_DIR). Версии языков берёт mise: tools в
+// вызове, mise.toml каталога (env_use) или глобальные. Каждый запуск продлевает срок
+// того, чем пользуется; недостающая версия перед установкой спрашивает видимость.
+
+export const visibility = z.enum(registry.VISIBILITY).optional().describe(pick({
+  ru: 'видимость новой установки — только если человек уже сказал, иначе стенд спросит сам',
+  en: 'visibility of a new install — only if the human said so, else the toolkit asks',
+}));
+
+/** Перед запуском: kit:/apt: в tools не место; недостающие версии — вопрос о видимости. */
+async function prepare(ctx, tools, given, tool) {
+  if (!tools?.length) return { fresh: [], choice: null };
+  const system = tools.filter(apt.isSystem);
+  if (system.length) {
+    throw new Error(`${system.join(', ')} — пакеты, а не версии: поставьте их env_install, и программы `
+      + 'будут доступны в любой команде без tools');
+  }
+  const fresh = await lifecycle.missing(mise.checkSpecs(tools));
+  const choice = fresh.length ? await lifecycle.chooseVisibility(ctx, { tool, specs: fresh, given }) : null;
+  return { fresh, choice };
+}
+
+/**
+ * Запуск с учётом: вопрос о видимости недостающего, задача, продление того, чем она
+ * пользуется. Установка отмечена с вопроса и до записи в реестр — сверка её не перехватит.
+ */
+async function launch(ctx, { tools, given, tool, cwd, command, job, background }) {
+  const { fresh, choice } = await prepare(ctx, tools, given, tool);
+  const ended = fresh.length ? lifecycle.beginInstall() : () => {};
+  let outcome;
+  try {
+    outcome = await jobs.runForeground(job, { background });
+  } catch (err) {
+    ended();
+    throw err;
+  }
+  lifecycle.trackRun(ctx, { jobId: outcome.id ?? outcome.report.id, tools, cwd, command, choice, fresh, ended });
+  return noted(jobReply(outcome), choice);
+}
+
+/** Ответ с пометкой о видимости, если что-то ставилось. */
+function noted(reply, choice) {
+  if (choice?.visibility) {
+    reply.data.installed = { visibility: choice.visibility };
+    if (choice.defaulted) reply.data.installed.note = 'человек не ответил — поставлено разово';
+  }
+  return reply;
+}
 
 /** Ответ инструмента по задаче: завершилась — результат, нет — id и как ждать дальше. */
 export function jobReply(outcome) {
@@ -69,7 +119,10 @@ const RUNNERS = {
 const BUILTIN = new Set(['bash', 'sh', 'node', 'perl']);
 
 const common = {
-  cwd: z.string().optional().describe(pick({ ru: 'каталог рабочей области, по умолчанию корень', en: 'workspace directory, root by default' })),
+  cwd: z.string().optional().describe(pick({
+    ru: 'каталог области или проекта хоста (host:shop, O:/Projects/shop)',
+    en: 'workspace or host project directory (host:shop, O:/Projects/shop)',
+  })),
   env: z.record(z.string()).optional().describe(pick({
     ru: 'переменные: значение, ws:<путь> или secret://<id>',
     en: 'variables: value, ws:<path> or secret://<id>',
@@ -98,29 +151,39 @@ export const tools = [
     secretRefs: ['env'],
     title: pick({ ru: 'Команда в рабочей среде', en: 'Command in the workspace' }),
     description: pick({
-      ru: 'Выполняет команду bash в контейнере стенда, в рабочей области: pip/composer/npm install, сборка, '
-        + 'тесты, скрипты над скачанными файлами, git clone. tools — версии mise на этот вызов '
-        + '(недостающие ставятся сами). Долгое уходит в фон задачей. Свои скрипты из tools/bin '
-        + 'вызываются по имени — help tools.',
-      en: 'Runs a bash command in the toolkit container, inside the workspace: pip/composer/npm install, '
-        + 'builds, tests, scripts over downloaded files, git clone. tools — mise versions for this call '
-        + '(missing ones get installed). Long runs move to a background job. Your own scripts in tools/bin '
-        + 'are called by name — help tools.',
+      ru: 'bash в контейнере стенда вместо docker run с php/python/node: php -l, composer, тесты, сборка. '
+        + 'tools — версии mise на вызов: собранные (env_list) — сразу, новая php — минуты один раз. '
+        + 'Долгое уходит в фон. Скрипты tools/bin — по имени.',
+      en: 'bash in the toolkit container instead of docker run with php/python/node: php -l, composer, tests, builds. '
+        + 'tools — mise versions per call: built ones (env_list) at once, a new php — minutes once. '
+        + 'Long runs go to the background. Scripts in tools/bin — by name.',
     }),
     input: {
       command: z.string(),
       tools: z.array(z.string()).optional().describe('python@3.11, php@7.4, node@22…'),
       ...common,
+      visibility,
     },
-    run: async (args, { secrets }) => jobReply(await jobs.runForeground({
-      argv: mise.execArgv(args.tools, ['bash', '-c', args.command]),
-      cwd: ws.resolve(args.cwd || '.'),
-      env: { ...mise.buildEnv(args.tools), ...args.env },
-      stdin: args.stdin,
-      timeoutMs: timeoutOf(args),
-      label: args.command,
-      secrets,
-    }, { background: args.background })),
+    run: async (args, { ctx, secrets }) => {
+      const cwd = ws.resolve(args.cwd || '.', { projects: true });
+      return launch(ctx, {
+        tools: args.tools,
+        given: args.visibility,
+        tool: 'exec',
+        cwd,
+        command: args.command,
+        background: args.background,
+        job: {
+          argv: mise.execArgv(args.tools, ['bash', '-c', args.command]),
+          cwd,
+          env: { ...mise.buildEnv(args.tools), ...args.env },
+          stdin: args.stdin,
+          timeoutMs: timeoutOf(args),
+          label: args.command,
+          secrets,
+        },
+      });
+    },
   },
 
   {
@@ -131,25 +194,21 @@ export const tools = [
     title: pick({ ru: 'Выполнить код', en: 'Run code' }),
     description: pick({
       ru: `Сохраняет код в файл и выполняет нужной версией языка. tool: ${Object.keys(RUNNERS).join(', ')} `
-        + '— с версией через @ (python@3.11, php@7.4). Код видит рабочую область по относительным путям. '
-        + 'Языка нет на машине человека — запускайте здесь, а не переходите на bash; повторится — '
-        + 'сохраните скриптом в tools/bin (help tools).',
+        + '— с версией через @ (python@3.11, php@7.4). Относительные пути — от cwd. Повторится — скрипт в tools/bin.',
       en: `Saves code to a file and runs it with the requested language version. tool: ${Object.keys(RUNNERS).join(', ')} `
-        + '— with a version after @ (python@3.11, php@7.4). The code sees the workspace by relative paths. '
-        + 'The language is missing on the human\'s machine — run it here instead of falling back to bash; '
-        + 'if it will repeat, save it as a script in tools/bin (help tools).',
+        + '— with a version after @ (python@3.11, php@7.4). Relative paths start at cwd. If it repeats — a script in tools/bin.',
     }),
     input: {
       tool: z.string().describe('python@3.11'),
       code: z.string(),
       args: z.array(z.string()).optional(),
       file: z.string().optional().describe(pick({
-        ru: 'куда сохранить код в рабочей области; по умолчанию .tk/run/<метка>/main.<ext>',
-        en: 'where to save the code in the workspace; defaults to .tk/run/<stamp>/main.<ext>',
+        ru: 'куда сохранить код; по умолчанию .tk/run/<метка>/main.<ext>',
+        en: 'where to save the code; defaults to .tk/run/<stamp>/main.<ext>',
       })),
       ...common,
     },
-    run: async (args, { secrets }) => {
+    run: async (args, { ctx, secrets }) => {
       const name = mise.toolName(args.tool);
       const runner = RUNNERS[name];
       if (!runner) {
@@ -157,24 +216,29 @@ export const tools = [
           + 'Для остального — exec с tools и своей командой');
       }
 
-      const file = args.file ? ws.resolve(args.file) : ws.output('run', `main.${runner.ext}`);
+      const file = args.file ? ws.resolve(args.file, { projects: true }) : ws.output('run', `main.${runner.ext}`);
       fs.mkdirSync(path.dirname(file), { recursive: true });
       fs.writeFileSync(file, args.code);
 
-      const cwd = ws.resolve(args.cwd || '.');
+      const cwd = ws.resolve(args.cwd || '.', { projects: true });
       const tools = args.tool.includes('@') || !BUILTIN.has(name) ? [args.tool] : [];
-      const outcome = await jobs.runForeground({
-        argv: mise.execArgv(tools, [...runner.argv(file), ...(args.args || [])]),
+      const reply = await launch(ctx, {
+        tools,
+        tool: 'run_code',
         cwd,
-        env: { ...mise.buildEnv(tools), ...args.env },
-        stdin: args.stdin,
-        timeoutMs: timeoutOf(args),
-        label: `${args.tool} ${ws.describe(file).path}`,
-        kind: 'code',
-        secrets,
-      }, { background: args.background });
-
-      const reply = jobReply(outcome);
+        command: args.code,
+        background: args.background,
+        job: {
+          argv: mise.execArgv(tools, [...runner.argv(file), ...(args.args || [])]),
+          cwd,
+          env: { ...mise.buildEnv(tools), ...args.env },
+          stdin: args.stdin,
+          timeoutMs: timeoutOf(args),
+          label: `${args.tool} ${ws.describe(file).path}`,
+          kind: 'code',
+          secrets,
+        },
+      });
       reply.data.file = ws.describe(file).path;
       return reply;
     },

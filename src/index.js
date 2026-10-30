@@ -6,6 +6,7 @@ import { start as startHttp } from './http.js';
 import { closeAll } from './transport/ssh.js';
 import { killAll } from './local/jobs.js';
 import { watch as watchVersionsHost } from './local/reach.js';
+import { start as startSweeper } from './local/sweeper.js';
 
 const arg = (name, fallback) => {
   const found = process.argv.find((value) => value.startsWith(`--${name}=`));
@@ -28,6 +29,9 @@ async function main() {
   }
 
   startHttp();
+  // Уборщик и восстановление пакетов — только у долгоживущего http-сервера: stdio-процессов
+  // бывает несколько разом, и чистить один том наперегонки им незачем.
+  startSweeper();
 }
 
 for (const signal of ['SIGINT', 'SIGTERM']) {

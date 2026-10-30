@@ -23,7 +23,7 @@ export const tools = [
     }),
     input: { path: z.string().optional(), recursive: z.boolean().optional() },
     run: (args) => {
-      const dir = ws.resolve(args.path || '.');
+      const dir = ws.resolve(args.path || '.', { projects: true });
       if (!fs.existsSync(dir)) throw new Error(`в рабочей области нет «${args.path}»`);
       if (!fs.statSync(dir).isDirectory()) return { data: ws.stat(dir) };
 
@@ -59,7 +59,7 @@ export const tools = [
       maxBytes: z.number().int().positive().optional(),
     },
     run: (args) => {
-      const file = ws.resolve(args.path);
+      const file = ws.resolve(args.path, { projects: true });
       if (!fs.existsSync(file) || !fs.statSync(file).isFile()) throw new Error(`файла «${args.path}» нет`);
       const size = fs.statSync(file).size;
       const offset = Math.min(args.offset || 0, size);
@@ -89,7 +89,7 @@ export const tools = [
     }),
     input: { path: z.string(), content: z.string(), append: z.boolean().optional() },
     run: (args) => {
-      const file = ws.resolve(args.path);
+      const file = ws.resolve(args.path, { projects: true });
       fs.mkdirSync(path.dirname(file), { recursive: true });
       if (args.append) fs.appendFileSync(file, args.content);
       else fs.writeFileSync(file, args.content);
@@ -105,8 +105,8 @@ export const tools = [
     description: pick({ ru: 'Переименовывает или переносит файл или каталог рабочей области.', en: 'Renames or moves a workspace file or directory.' }),
     input: { from: z.string(), to: z.string() },
     run: (args) => {
-      const from = ws.resolve(args.from);
-      const to = ws.resolve(args.to);
+      const from = ws.resolve(args.from, { projects: true });
+      const to = ws.resolve(args.to, { projects: true });
       if (!fs.existsSync(from)) throw new Error(`«${args.from}» нет`);
       fs.mkdirSync(path.dirname(to), { recursive: true });
       fs.renameSync(from, to);
@@ -125,8 +125,9 @@ export const tools = [
     }),
     input: { path: z.string(), recursive: z.boolean().optional() },
     run: (args) => {
-      const target = ws.resolve(args.path);
+      const target = ws.resolve(args.path, { projects: true });
       if (target === fs.realpathSync(ws.ensure())) throw new Error('корень рабочей области не удаляется — удаляйте его содержимое');
+      if (ws.isProjectsRoot(target)) throw new Error('корень папки проектов не удаляется');
       if (!fs.existsSync(target)) return { data: { removed: false, path: args.path } };
       if (fs.statSync(target).isDirectory()) {
         if (args.recursive) fs.rmSync(target, { recursive: true, force: true });

@@ -13,6 +13,17 @@ const str = (name, def = '') => {
   return raw === undefined || raw === '' ? def : raw;
 };
 
+const UNITS = { s: 1, m: 60, h: 3600, d: 86400 };
+
+/** Длительность в мс: «12h», «30d», «90m», «45s»; голое число — секунды. */
+export function duration(raw, def) {
+  const match = /^\s*(\d+(?:\.\d+)?)\s*([smhd]?)\s*$/i.exec(String(raw ?? ''));
+  if (!match) return duration(def);
+  return Number(match[1]) * UNITS[(match[2] || 's').toLowerCase()] * 1000;
+}
+
+const dur = (name, def) => duration(process.env[name], def);
+
 export const cfg = {
   lang: str('TK_LANG', 'ru'),
   port: int('MCP_PORT', 8933),
@@ -52,6 +63,24 @@ export const cfg = {
   foregroundMs: int('TK_FOREGROUND_TIMEOUT', 50) * 1000,
   // Сколько живут завершённые задачи и их логи
   jobsKeep: int('TK_JOBS_KEEP', 200),
+
+  // Срок жизни поставленных инструментов — от последнего использования. Разовый живёт
+  // TK_TOOL_TTL_ONCE; публичный и приватный — свою базу плюс TK_TOOL_TTL_PER_DAY за каждые
+  // сутки, когда им пользовались, но не дольше TK_TOOL_TTL_MAX. Уборщик проходит раз в TK_TOOLS_SWEEP.
+  toolTtl: {
+    once: dur('TK_TOOL_TTL_ONCE', '12h'),
+    public: dur('TK_TOOL_TTL_PUBLIC', '30d'),
+    private: dur('TK_TOOL_TTL_PRIVATE', '30d'),
+    perDay: dur('TK_TOOL_TTL_PER_DAY', '3d'),
+    max: dur('TK_TOOL_TTL_MAX', '180d'),
+  },
+  toolsSweepMs: dur('TK_TOOLS_SWEEP', '1h'),
+
+  // Папка проектов хоста, смонтированная в стенд (PROJECTS_DIR в .env): по этому префиксу
+  // путь хоста, который знает агент (O:\Projects\shop), переводится в путь контейнера.
+  // Относительный путь (./projects — умолчание релиза) префиксом не служит: агент таких
+  // путей не знает, ему остаётся форма host:shop.
+  projectsHost: /^([A-Za-z]:[\\/]|\/)/.test(str('PROJECTS_DIR')) ? str('PROJECTS_DIR') : '',
 
   // Проверка обновлений
   updateCheck: str('TK_UPDATE_CHECK', '1') !== '0',

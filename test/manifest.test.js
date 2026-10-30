@@ -100,3 +100,17 @@ test('у изменяющих удалённых инструментов ест
     assert.ok(tool.summary, `${tool.name}: нет summary, человеку нечего показать`);
   }
 });
+
+// Клиенты обрезают инструкции сервера около 2 КБ: всё, что ниже обреза, агент не увидит.
+test('инструкции помещаются в потолок и с длинной строкой «уже стоят»', async () => {
+  const { instructions, INSTRUCTIONS_MAX } = await import('../src/server.js');
+  const installed = 'php 5.6.40, 7.4.33, 8.1.31, 8.2.35, 8.3.35; python 3.11.17, 3.12.15; node 22.23.3; '
+    + 'ruby 3.3.6; go 1.23.4; kit:office; kit:pdf; kit:ocr';
+  const text = instructions(select('all').groups, { installed, projects: 'O:/Projects/', notice: null });
+  assert.ok(text.length <= INSTRUCTIONS_MAX, `инструкции ${text.length} знаков при потолке ${INSTRUCTIONS_MAX}`);
+  assert.match(text, /Уже стоят: php 5\.6\.40/);
+  assert.match(text, /O:\/Projects\/<проект>/);
+
+  const notice = 'Доступно обновление стенда 9.9.9.';
+  assert.ok(instructions(select('all').groups, { installed, notice }).startsWith(notice), 'уведомление — первым, обрезка его не съест');
+});
